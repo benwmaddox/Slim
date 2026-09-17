@@ -148,6 +148,17 @@ reachable from the entry points. The host specializes to the imports present in
 the module. All interop is deliberately small; shared-memory batching remains a
 future comparison against this baseline.
 
+## Array planning experiment
+
+`node tools/compare-enemy-arrays.mjs` compares Blockbound's existing enemy code,
+a shared function with scalar globals, and fixed memory arrays with runtime
+loops. It writes selected packages and replay results under
+`output/array-study/runtime-comparison`; normal builds and `dist` are unaffected.
+The temporary compiler supports only the experiment's direct array loads and
+stores. Production array syntax is not implemented. See [ARRAY_PLAN.md](ARRAY_PLAN.md)
+for the proposed language slice and measurements. The comparison requires
+`wasm-opt`, `wasm-dis`, Python, and the existing development dependencies.
+
 ## Limits
 
 This is a prototype, not a general compiler or game engine. WASM and the f32 JS
