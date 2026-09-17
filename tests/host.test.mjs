@@ -2,22 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {compile} from '../src/compiler.mjs';
-import {makeHtml} from '../src/host.mjs';
+import {makeHtml, makeJavaScriptHtml} from '../src/host.mjs';
 
 const inputSource = 'fn init() {} fn frame() { input(0); }';
 const soundSource = 'fn init() {} fn frame() { sound(0, 0, 0); }';
+const jsFactory = '(e => { captureHost(e); return {init() {}, frame() {}} })';
 
 function scriptOf(page) {
   return page.slice(page.indexOf('<script>') + 8, page.lastIndexOf('</script>'));
 }
 
-async function boot(source, {audio = false} = {}) {
-  const page = makeHtml(compile(source), {title: 'host test'});
+async function bootPage(page, {audio = false, javascript = false} = {}) {
   const globalHandlers = new Map();
   const canvasHandlers = new Map();
   const audioStats = {contexts: 0, oscillators: 0};
   let capturedImports;
   let frameCallback;
+  const captureHost = (host) => { capturedImports = host; };
   const listen = (map, type, handler) => {
     const handlers = map.get(type) || [];
     handlers.push(handler);
@@ -71,6 +72,7 @@ async function boot(source, {audio = false} = {}) {
       frameCallback = callback;
       return 1;
     },
+    captureHost,
     addEventListener(type, handler) { listen(globalHandlers, type, handler); },
     AudioContext: audio ? AudioContextMock : undefined,
     webkitAudioContext: undefined,
@@ -85,7 +87,8 @@ async function boot(source, {audio = false} = {}) {
   const context = vm.createContext(browser);
   vm.runInContext(scriptOf(page), context, {filename: 'slim-generated-host.js'});
   await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(capturedImports, 'generated host should instantiate WASM');
+  if (javascript) capturedImports = {e: capturedImports};
+  assert.ok(capturedImports, 'generated host should initialize a host object');
   assert.equal(typeof frameCallback, 'function');
   return {
     page,
@@ -94,6 +97,14 @@ async function boot(source, {audio = false} = {}) {
     dispatchGlobal: (type, event) => dispatch(globalHandlers, type, event),
     dispatchCanvas: (type, event) => dispatch(canvasHandlers, type, event)
   };
+}
+
+async function boot(source, options = {}) {
+  return bootPage(makeHtml(compile(source), {title: 'host test'}), options);
+}
+
+async function bootJavaScript(imports, options = {}) {
+  return bootPage(makeJavaScriptHtml(jsFactory, {title: 'host test', imports}), {...options, javascript: true});
 }
 
 function keyboard(key, code = key, repeat = false) {
@@ -125,6 +136,16 @@ test('direction keys do not set the primary pressed edge', async () => {
   assert.equal(host.imports.e.input(5), 0);
 });
 
+test('JavaScript factory shares the input host contract', async () => {
+  const hosts = [await boot(inputSource), await bootJavaScript(['input'])];
+  for (const host of hosts) {
+    host.dispatchCanvas('pointermove', pointer(-1));
+    host.dispatchGlobal('keydown', keyboard(' ', 'Space'));
+    assert.equal(host.imports.e.input(4), 1);
+    assert.equal(host.imports.e.input(8), 0);
+  }
+});
+
 test('pointercancel clears pointer-held input even with button -1', async () => {
   const host = await boot(inputSource);
   host.dispatchCanvas('pointerdown', pointer());
@@ -135,9 +156,11 @@ test('pointercancel clears pointer-held input even with button -1', async () => 
 });
 
 test('zero-gain sound does not construct audio or oscillator nodes', async () => {
-  const host = await boot(soundSource, {audio: true});
-  host.imports.e.sound(0, 0, 0);
-  assert.deepEqual(host.audioStats, {contexts: 0, oscillators: 0});
-  host.imports.e.sound(0, 0, 0.5);
-  assert.deepEqual(host.audioStats, {contexts: 1, oscillators: 1});
+  const hosts = [await boot(soundSource, {audio: true}), await bootJavaScript(['sound'], {audio: true})];
+  for (const host of hosts) {
+    host.imports.e.sound(0, 0, 0);
+    assert.deepEqual(host.audioStats, {contexts: 0, oscillators: 0});
+    host.imports.e.sound(0, 0, 0.5);
+    assert.deepEqual(host.audioStats, {contexts: 1, oscillators: 1});
+  }
 });

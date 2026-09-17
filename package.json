@@ -7,5 +7,8 @@
     "build": "node tools/build.mjs examples/rainbow.slim",
     "test": "node --test",
     "check": "node tools/build.mjs examples/rainbow.slim --check"
+  },
+  "devDependencies": {
+    "terser": "5.43.1"
   }
 }

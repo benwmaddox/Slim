@@ -149,3 +149,18 @@ test('evaluates constant globals with the same f32 rounding as runtime arithmeti
   `);
   assert.equal(instance.exports.frame(), 0);
 });
+
+test('lowers f32 remainder with truncation toward zero', () => {
+  const positive = instantiate(`
+    fn remainder(a, b) { return a % b; }
+    fn init() {}
+    fn frame() { return remainder(5, 3); }
+  `).instance;
+  const negative = instantiate(`
+    fn remainder(a, b) { return a % b; }
+    fn init() {}
+    fn frame() { return remainder(-5, 3); }
+  `).instance;
+  assert.equal(positive.exports.frame(), 2);
+  assert.equal(negative.exports.frame(), -2);
+});

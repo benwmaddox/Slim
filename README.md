@@ -4,32 +4,42 @@ A small experimental game language that compiles directly to WebAssembly, with
 a triangle-only WebGL host, procedural JavaScript sound, and keyboard/pointer
 input. Independent of Stasis. See [PLAN.md](PLAN.md) for scope and milestones.
 
-The first playable checkpoint is 3,753 bytes zipped. See [PROGRESS.md](PROGRESS.md)
-for measurements, validation, and current limits.
+The same source builds to WASM or JavaScript. See [PROGRESS.md](PROGRESS.md)
+for complete ZIP comparisons, validation, and current limits.
 
 ## Build
 
-Requires modern Node.js and Python 3. There are no npm dependencies.
+Requires modern Node.js, Python 3, and Binaryen's `wasm-dis` for readable WAT.
+Terser is a pinned build dependency; nothing from npm ships with the game.
 
 ```sh
+npm ci
 npm test
 npm run build
 ```
 
-The playable submission is `dist/game.zip`. The build compares embedded and
-separate WASM layouts, including archive overhead, and selects the smaller
-package. JavaScript, shaders, and styles are inline in `index.html`; a separate
-layout also contains `game.wasm`. Other files in `dist` are inspection/build
-artifacts and are not added to the submitted ZIP. `dist/size.json` reports total
-archive bytes against the 13,312-byte target.
+Outputs follow the source basename: `rainbow.wasm`, `rainbow.wat`,
+`rainbow.html`, and `rainbow.zip`. The build compares embedded and separate WASM,
+plain and optional Binaryen -Oz, and original versus Terser-minified scripts.
+It selects by complete ZIP size, including archive overhead.
+
+`rainbow.js.html` / `rainbow.js.zip` contain the native JavaScript version;
+`rainbow.f32.html` / `rainbow.f32.zip` preserve the WASM numeric behavior.
+Readable generated factories are `rainbow.js` and `rainbow.f32.js`.
+`rainbow.size.json` records every candidate against the 13,312-byte target.
+Archives use top-level `index.html`, as required by the supplied rules; an
+external WASM layout also contains `rainbow.wasm`. Inspection artifacts and
+development dependencies are excluded.
 
 Serve the selected output with `python -m http.server 8000 --directory dist`,
-then open `http://localhost:8000/`. Separate WASM needs HTTP because browsers
+then open `http://localhost:8000/rainbow.html` or `rainbow.js.html`.
+Separate WASM needs HTTP because browsers
 restrict file URL fetching. The `*-embedded.zip` variants are self-contained
 and can be opened directly after extraction.
 
 Optional: put Binaryen's `wasm-opt` on PATH, or set `SLIM_WASM_OPT` to its
-executable. The build compares plain and `-Oz` output across both packaging
+executable. Set `SLIM_WASM_DIS` if the disassembler is not on PATH. The build
+compares plain and `-Oz` output across both packaging
 layouts and selects the smallest complete ZIP. Set `SLIM_PYTHON` if Python uses
 a different command name. An explicitly configured optimizer failure aborts
 the build.
@@ -45,7 +55,8 @@ fn frame() {
 }
 ```
 
-Numbers, parameters, globals, locals, and function results are f32. Functions
+Numbers, parameters, globals, locals, and function results are f32 in WASM and
+exact-f32 JS. The native JS comparison uses JavaScript number semantics. Functions
 without a return produce zero. Both `init` and `frame` must be declared and take
 zero arguments. Globals are mutable persistent game state, with constant numeric
 initializers. Locals are function-scoped in v0 and start at zero on each call.
@@ -81,8 +92,9 @@ future comparison against this baseline.
 
 ## Limits
 
-This is a prototype, not a general compiler or game engine. All source arithmetic
-uses single precision. Loops are authored code and must terminate. Browser audio
+This is a prototype, not a general compiler or game engine. WASM and the f32 JS
+profile use single precision. Native JS uses double precision and native `%`;
+rounding and collision timing can differ. Loops must terminate. Browser audio
 requires a user gesture. Latest Chrome and Firefox remain the contest compatibility
 target; validation evidence and outstanding coverage are recorded as development
 progresses. The sample is a technical experiment, not a contest submission.

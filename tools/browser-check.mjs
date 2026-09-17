@@ -2,7 +2,7 @@ import {createServer} from 'node:http';
 import {existsSync} from 'node:fs';
 import {mkdir, readFile, readdir, stat, writeFile} from 'node:fs/promises';
 import {execFileSync} from 'node:child_process';
-import {dirname, extname, isAbsolute, join, resolve} from 'node:path';
+import {basename, dirname, extname, isAbsolute, join, resolve} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -26,6 +26,9 @@ const requestedBrowsers = (option('browsers') || process.env.SLIM_BROWSERS || 'c
   .split(',').map((name) => name.trim().toLowerCase()).filter(Boolean);
 const allowMissing = hasFlag('allow-missing');
 const timeoutMs = Number(option('timeout') || process.env.SLIM_BROWSER_TIMEOUT || 8000);
+const stem = basename(option('source') || 'rainbow', '.slim');
+const requestedProfiles = (option('profiles') || 'wasm,js-native,js-f32').split(',');
+const profileSuffix = {'wasm': '', 'js-native': '.js', 'js-f32': '.f32'};
 
 function fail(message) {
   throw new Error(message);
@@ -34,11 +37,6 @@ function fail(message) {
 function asAbsolute(value) {
   if (!value) return value;
   return isAbsolute(value) ? value : resolve(root, value);
-}
-
-async function firstExisting(paths) {
-  for (const candidate of paths) if (candidate && existsSync(candidate)) return candidate;
-  return undefined;
 }
 
 async function playwrightCandidates() {
@@ -125,11 +123,11 @@ async function browserExecutable(name, type) {
   return common.find((candidate) => candidate && existsSync(candidate));
 }
 
-async function openServer(directory) {
+async function openServer(directory, entry) {
   const server = createServer(async (request, response) => {
     try {
       const pathname = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname);
-      const relative = pathname === '/' ? 'index.html' : pathname.slice(1);
+      const relative = pathname === '/' ? entry : pathname.slice(1);
       const file = resolve(directory, relative);
       if (!file.startsWith(`${directory}${process.platform === 'win32' ? '\\' : '/'}`)) {
         response.writeHead(403).end();
@@ -151,7 +149,7 @@ async function openServer(directory) {
     server.listen(0, '127.0.0.1', resolvePromise);
   });
   const address = server.address();
-  return {server, url: `http://127.0.0.1:${address.port}/index.html`};
+  return {server, url: `http://127.0.0.1:${address.port}/`};
 }
 
 const probeScript = `
@@ -352,72 +350,69 @@ function assertBrowser(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-async function main() {
-  const indexPath = join(dist, 'index.html');
-  if (!existsSync(indexPath)) fail(`missing generated HTML: ${indexPath}; run npm run build first`);
-  await mkdir(output, {recursive: true});
-  const html = await readFile(indexPath, 'utf8');
-  const zipPath = join(dist, 'game.zip');
-  const sizePath = join(dist, 'size.json');
-  const size = existsSync(sizePath) ? JSON.parse(await readFile(sizePath, 'utf8')) : undefined;
-  const externalWasm = /\bfetch\s*\(\s*["']game\.wasm["']/.test(html);
-  let server;
-  let url = pathToFileURL(indexPath).href;
-  if (externalWasm) {
-    const opened = await openServer(dist);
-    server = opened.server;
-    url = opened.url;
-  }
+function verifyArchive(htmlPath, zipPath, wasmName) {
+  const script = `import json,pathlib,sys,zipfile
+p=pathlib.Path(sys.argv[1]); h=pathlib.Path(sys.argv[2]); w=sys.argv[3]
+with zipfile.ZipFile(p) as z:
+ names=sorted(z.namelist())
+ assert names==['index.html'] or (w and names==sorted(['index.html',w])), names
+ assert z.read('index.html')==h.read_bytes(), 'HTML differs from ZIP'
+ if w in names: assert z.read(w)==(h.parent/w).read_bytes(), 'WASM differs from ZIP'
+ print(json.dumps(names))`;
+  return JSON.parse(execFileSync(process.env.SLIM_PYTHON || 'python',
+    ['-c', script, zipPath, htmlPath, wasmName], {encoding: 'utf8'}));
+}
 
+async function main() {
+  await mkdir(output, {recursive: true});
+  const sizePath = join(dist, `${stem}.size.json`);
   const summary = {
     generatedAt: new Date().toISOString(),
-    artifact: {
-      dist,
-      index: indexPath,
-      zip: existsSync(zipPath) ? zipPath : null,
-      zipBytes: existsSync(zipPath) ? (await stat(zipPath)).size : null,
-      size,
-      wasmLayout: externalWasm ? 'external' : 'embedded',
-      urlMode: externalWasm ? 'local-http-for-fetch' : 'file'
-    },
+    comparison: existsSync(sizePath) ? JSON.parse(await readFile(sizePath, 'utf8')) : null,
     requestedBrowsers,
-    browsers: {},
+    profiles: {},
     coverageComplete: false
   };
-
+  let server;
   try {
-    let playwright;
-    try {
-      playwright = await loadPlaywright();
-      summary.playwright = {status: 'loaded', module: process.env.SLIM_PLAYWRIGHT_MODULE || 'resolved installed/cached module'};
-    } catch (error) {
-      summary.playwright = {status: 'unavailable', reason: error.message};
-      console.error(error.message);
-      await writeFile(join(output, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
-      process.exitCode = 2;
-      return;
-    }
-    for (const name of requestedBrowsers) {
-      if (!['chromium', 'firefox'].includes(name)) {
-        summary.browsers[name] = {name, status: 'unavailable', reason: `unsupported browser name: ${name}`};
-        continue;
+    const playwright = await loadPlaywright();
+    const opened = await openServer(dist, `${stem}.html`);
+    server = opened.server;
+    for (const profile of requestedProfiles) {
+      if (!Object.hasOwn(profileSuffix, profile)) fail(`Unknown profile: ${profile}`);
+      const name = `${stem}${profileSuffix[profile]}`;
+      const htmlPath = join(dist, `${name}.html`);
+      const zipPath = join(dist, `${name}.zip`);
+      if (!existsSync(htmlPath) || !existsSync(zipPath)) fail(`Missing ${name} output; run npm run build first`);
+      const entries = verifyArchive(htmlPath, zipPath, profile === 'wasm' ? `${stem}.wasm` : '');
+      const result = summary.profiles[profile] = {
+        artifact: {html: htmlPath, zip: zipPath, zipBytes: (await stat(zipPath)).size, entries},
+        browsers: {}
+      };
+      const url = new URL(encodeURIComponent(`${name}.html`), opened.url).href;
+      for (const browserName of requestedBrowsers) {
+        const screenshot = join(output, `${profile}-${browserName}.png`);
+        if (!['chromium', 'firefox'].includes(browserName)) {
+          result.browsers[browserName] = {status: 'unavailable', reason: `Unsupported browser: ${browserName}`};
+        } else {
+          result.browsers[browserName] = await runBrowser(browserName, playwright, url, screenshot);
+        }
+        const browser = result.browsers[browserName];
+        console.log(`${profile} ${browserName}: ${browser.status}${browser.version ? ` (${browser.version})` : ''}${browser.reason ? ` — ${browser.reason}` : ''}`);
       }
-      const screenshot = join(output, `${name}.png`);
-      summary.browsers[name] = await runBrowser(name, playwright, url, screenshot);
-      const result = summary.browsers[name];
-      console.log(`${name}: ${result.status}${result.version ? ` (${result.version})` : ''}${result.reason ? ` — ${result.reason}` : ''}`);
     }
+  } catch (error) {
+    summary.error = error.message;
+    console.error(error.message);
+    process.exitCode = 1;
   } finally {
     if (server) await new Promise((resolvePromise) => server.close(resolvePromise));
   }
-
-  const results = Object.values(summary.browsers);
-  summary.coverageComplete = results.length > 0 && results.every((result) => result.status === 'passed');
+  const results = Object.values(summary.profiles).flatMap(profile => Object.values(profile.browsers));
+  summary.coverageComplete = !summary.error && results.length > 0 && results.every(result => result.status === 'passed');
   await writeFile(join(output, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
-  console.log(JSON.stringify(summary, null, 2));
-  const failed = results.some((result) => result.status === 'failed');
-  const unavailable = results.some((result) => result.status === 'unavailable');
-  if (failed || (unavailable && !allowMissing) || !summary.coverageComplete && !allowMissing) process.exitCode = 1;
+  console.log(`Summary: ${join(output, 'summary.json')}`);
+  if (results.some(result => result.status === 'failed') || !summary.coverageComplete && !allowMissing) process.exitCode = 1;
 }
 
 await main();

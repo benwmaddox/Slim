@@ -14,7 +14,7 @@ ZIP of at most 13,312 bytes, including archive overhead.
   and submits them to WebGL in one draw per simulation frame.
 - JS sound synthesis and keyboard/pointer input, accessed through three compact
   WASM imports. This is a measurable baseline before designing a buffered ABI.
-- Compare embedded WASM with a separate packaged `game.wasm`; select the smaller
+- Compare embedded WASM with a separate source-named WASM; select the smaller
   complete ZIP. A same-package fetch is allowed; there are no external resources.
 - Fixed 60 Hz simulation with bounded catch-up. Focus loss clears input.
 - A fresh Rainbow Run sample demonstrates game state, collision, scoring,
@@ -40,6 +40,10 @@ ZIP of at most 13,312 bytes, including archive overhead.
 3. Add fixed arrays only when a second game requires them.
 4. Add reachability for state and host feature removal; compression experiments
    must preserve behavior and improve the final ZIP, not merely raw WASM size.
+
+The comparison slice emits native JS and exact-f32 JS through the same browser
+host, readable selected WAT, source-named artifacts, and Terser variants. Choose
+packaging by complete ZIP size; preserve readable sources separately.
 
 No general optimizer or complex compiler framework is planned for v0. Build
 dependencies do not ship. An existing compiler/runtime can be reused to create

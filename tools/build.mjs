@@ -1,51 +1,296 @@
-import {readFile, writeFile, mkdir, stat} from 'node:fs/promises';
+import {existsSync} from 'node:fs';
+import {readFile, writeFile, mkdir, stat, rm, mkdtemp, copyFile} from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
-import {resolve, dirname} from 'node:path';
+import {delimiter, dirname, extname, basename, join, resolve, sep} from 'node:path';
+import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
-import {compile} from '../src/compiler.mjs';
-import {makeHtml} from '../src/host.mjs';
+import {compileDetailed} from '../src/compiler.mjs';
+import {compileJavaScript} from '../src/javascript.mjs';
+import {makeHtml, makeJavaScriptHtml} from '../src/host.mjs';
+import {minifyHtml} from './minify.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const source = resolve(process.argv[2] || 'examples/rainbow.slim');
-const output = resolve(root, 'dist');
-await mkdir(output, {recursive:true});
-const wasm = compile(await readFile(source, 'utf8'));
-if (!WebAssembly.validate(wasm)) throw Error('Compiler emitted invalid WASM');
-await writeFile(resolve(output, 'game.wasm'), wasm);
-const modules = [{name:'plain',bytes:wasm}];
-// Optional build tool only; an explicit configuration must succeed.
-const optimizer = process.env.SLIM_WASM_OPT || 'wasm-opt';
-const optimizedPath = resolve(output, 'optimized.wasm');
-const optimization = spawnSync(optimizer, [resolve(output,'game.wasm'), '-Oz', '--strip-debug', '--strip-producers', '-o', optimizedPath], {encoding:'utf8'});
-if (optimization.status === 0) {
-  const bytes = await readFile(optimizedPath);
-  if (!WebAssembly.validate(bytes)) throw Error('Optimizer emitted invalid WASM');
-  modules.push({name:'Oz',bytes});
-} else if (process.env.SLIM_WASM_OPT) {
-  throw Error(`Configured optimizer failed: ${optimization.error || optimization.stderr}`);
-} else if (optimization.error?.code !== 'ENOENT') {
-  throw Error(`Optimizer failed: ${optimization.error || optimization.stderr}`);
+const budget = 13312;
+
+function usage() {
+  console.log('Usage: node tools/build.mjs [source.slim] [--out-dir DIR] [--check]');
 }
-const candidates = modules.flatMap(module=>['embedded','external'].map(layout=>({name:`${module.name}-${layout}`,optimization:module.name,layout,bytes:module.bytes})));
-function page(candidate) {
-  return makeHtml(candidate.bytes,{title:'Slim — Rainbow Run', ...(candidate.layout==='external'?{wasmUrl:'game.wasm'}:{})});
+
+function parseArgs(argv) {
+  let source;
+  let outDir;
+  let check = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === '--help' || argument === '-h') {
+      usage();
+      process.exit(0);
+    }
+    if (argument === '--check') {
+      check = true;
+      continue;
+    }
+    if (argument === '--out-dir' || argument.startsWith('--out-dir=')) {
+      outDir = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : argv[++index];
+      if (!outDir) throw new Error('--out-dir requires a directory');
+      continue;
+    }
+    if (argument === '--source' || argument.startsWith('--source=')) {
+      source = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : argv[++index];
+      if (!source) throw new Error('--source requires a .slim file');
+      continue;
+    }
+    if (argument.startsWith('-')) throw new Error(`unknown option ${argument}`);
+    if (source) throw new Error(`unexpected extra source argument ${argument}`);
+    source = argument;
+  }
+  return {
+    source: resolve(root, source || 'examples/rainbow.slim'),
+    output: resolve(root, outDir || 'dist'),
+    check,
+  };
 }
-for (const candidate of candidates) {
-  const html=page(candidate);
-  candidate.htmlBytes=Buffer.byteLength(html);
-  await writeFile(resolve(output,'index.html'), html);
-  await writeFile(resolve(output,'game.wasm'),candidate.bytes);
-  const entries=candidate.layout==='external'?['index.html','game.wasm']:['index.html'];
-  const zipped = spawnSync(process.env.SLIM_PYTHON || 'python', [resolve(root,'tools/zip.py'), output, resolve(output,`${candidate.name}.zip`),...entries], {encoding:'utf8'});
-  if (zipped.status !== 0) throw Error(`ZIP failed: ${zipped.error || zipped.stderr}`);
-  candidate.zipBytes = (await stat(resolve(output,`${candidate.name}.zip`))).size;
+
+function safeStem(source) {
+  const raw = basename(source, extname(source));
+  const stem = raw.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  return stem || 'game';
 }
-candidates.sort((a,b)=>a.zipBytes-b.zipBytes);
-const best=candidates[0];
-await writeFile(resolve(output,'index.html'),page(best));
-await writeFile(resolve(output,'game.wasm'),best.bytes);
-await writeFile(resolve(output,'game.zip'),await readFile(resolve(output,`${best.name}.zip`)));
-const report={budget:13312, selected:best.name, layout:best.layout, zipBytes:best.zipBytes, remaining:13312-best.zipBytes, candidates:candidates.map(c=>({name:c.name,wasmBytes:c.bytes.length,htmlBytes:c.htmlBytes,zipBytes:c.zipBytes}))};
-await writeFile(resolve(output,'size.json'),JSON.stringify(report,null,2)+'\n');
-console.log(JSON.stringify(report,null,2));
-if (best.zipBytes>13312) process.exitCode=1;
+
+function titleFor(stem) {
+  const words = stem.split(/[-_]+/).filter(Boolean);
+  return words.length ? words.map((word) => word[0].toUpperCase() + word.slice(1)).join(' ') : 'Slim';
+}
+
+function pathExecutable(name) {
+  const pathExts = process.platform === 'win32'
+    ? (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';')
+    : [''];
+  for (const directory of (process.env.PATH || '').split(delimiter)) {
+    if (!directory) continue;
+    for (const extension of pathExts) {
+      const candidate = join(directory, name.toLowerCase().endsWith(extension.toLowerCase()) ? name : `${name}${extension}`);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+function configuredExecutable(name, configured, siblingOf) {
+  if (configured) return configured;
+  if (siblingOf && (siblingOf.includes('\\') || siblingOf.includes('/'))) {
+    const directory = dirname(siblingOf);
+    const sibling = join(directory, `${name}${process.platform === 'win32' ? '.exe' : ''}`);
+    if (existsSync(sibling)) return sibling;
+  }
+  return pathExecutable(name) || (process.platform === 'win32' ? pathExecutable(`${name}.exe`) : undefined);
+}
+
+function run(command, args, label) {
+  const result = spawnSync(command, args, {encoding: 'utf8', windowsHide: true});
+  if (result.error || result.status !== 0) {
+    const detail = result.error?.message || result.stderr?.trim() || result.stdout?.trim() || `exit ${result.status}`;
+    throw new Error(`${label} failed: ${detail}`);
+  }
+  return result;
+}
+
+async function writeArchive({python, zipTool, output, stem, html, wasm}) {
+  const temporary = await mkdtemp(join(tmpdir(), 'slim-package-'));
+  try {
+    await writeFile(join(temporary, 'index.html'), html);
+    const entries = ['index.html'];
+    if (wasm) {
+      await writeFile(join(temporary, `${stem}.wasm`), wasm);
+      entries.push(`${stem}.wasm`);
+    }
+    run(python, [zipTool, temporary, output, ...entries], 'ZIP packaging');
+    return (await stat(output)).size;
+  } finally {
+    const tempRoot = resolve(tmpdir());
+    const target = resolve(temporary);
+    if (!target.startsWith(`${tempRoot}${sep}`)) throw new Error(`refusing to remove archive staging path outside ${tempRoot}`);
+    await rm(target, {recursive: true, force: true});
+  }
+}
+
+function candidateSummary(candidate) {
+  return {
+    id: candidate.id,
+    backend: candidate.backend,
+    precision: candidate.precision,
+    optimization: candidate.optimization,
+    layout: candidate.layout,
+    minified: candidate.minified,
+    wasmBytes: candidate.wasmBytes,
+    htmlBytes: candidate.htmlBytes,
+    zipBytes: candidate.zipBytes,
+    archive: candidate.archive,
+  };
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  const sourceText = await readFile(options.source, 'utf8');
+  await mkdir(options.output, {recursive: true});
+
+  const stem = safeStem(options.source);
+  const title = titleFor(stem);
+  const python = process.env.SLIM_PYTHON || 'python';
+  const zipTool = resolve(root, 'tools/zip.py');
+  const records = [];
+  const wasmModules = [];
+
+  const detailed = compileDetailed(sourceText);
+  const plainBytes = detailed.wasm;
+  if (!WebAssembly.validate(plainBytes)) throw new Error('Compiler emitted invalid WASM');
+  const plainPath = join(options.output, `${stem}.plain.wasm`);
+  await writeFile(plainPath, plainBytes);
+  wasmModules.push({name: 'plain', bytes: plainBytes});
+
+  const optimizer = configuredExecutable('wasm-opt', process.env.SLIM_WASM_OPT);
+  if (optimizer) {
+    const optimizedPath = join(options.output, `${stem}.Oz.wasm`);
+    const result = spawnSync(optimizer, [plainPath, '-Oz', '--strip-debug', '--strip-producers', '-o', optimizedPath], {encoding: 'utf8', windowsHide: true});
+    if (result.error || result.status !== 0) {
+      const detail = result.error?.message || result.stderr?.trim() || result.stdout?.trim() || `exit ${result.status}`;
+      throw new Error(`${process.env.SLIM_WASM_OPT ? 'Configured ' : ''}wasm-opt failed: ${detail}`);
+    } else {
+      const bytes = await readFile(optimizedPath);
+      if (!WebAssembly.validate(bytes)) throw new Error('wasm-opt emitted invalid WASM');
+      wasmModules.push({name: 'Oz', bytes});
+    }
+  } else if (process.env.SLIM_WASM_OPT) {
+    throw new Error(`Configured wasm-opt was not found: ${process.env.SLIM_WASM_OPT}`);
+  }
+
+  for (const module of wasmModules) {
+    for (const layout of ['embedded', 'external']) {
+      const unminified = makeHtml(module.bytes, {
+        title,
+        ...(layout === 'external' ? {wasmUrl: `${stem}.wasm`} : {}),
+      });
+      const variants = [
+        {suffix: '', html: unminified, minified: false},
+        {suffix: '-min', html: await minifyHtml(unminified), minified: true},
+      ];
+      for (const variant of variants) {
+        const id = `${module.name}-${layout}${variant.suffix}`;
+        const archive = `${stem}.${id}.zip`;
+        const archivePath = join(options.output, archive);
+        const zipBytes = await writeArchive({
+          python,
+          zipTool,
+          output: archivePath,
+          stem,
+          html: variant.html,
+          wasm: layout === 'external' ? module.bytes : undefined,
+        });
+        records.push({
+          id,
+          backend: 'wasm',
+          precision: 'f32',
+          optimization: module.name,
+          layout,
+          minified: variant.minified,
+          wasmBytes: module.bytes.length,
+          htmlBytes: Buffer.byteLength(variant.html),
+          zipBytes,
+          archive,
+          bytes: module.bytes,
+          html: variant.html,
+        });
+      }
+    }
+  }
+
+  for (const profile of [{name: 'js', precision: 'native'}, {name: 'f32', precision: 'f32'}]) {
+    const result = compileJavaScript(sourceText, {precision: profile.precision});
+    if (result.precision !== profile.precision) throw new Error(`JavaScript backend returned ${result.precision} for ${profile.precision}`);
+    const codeArtifact = profile.name === 'js' ? `${stem}.js` : `${stem}.f32.js`;
+    await writeFile(join(options.output, codeArtifact), result.code);
+    const unminified = makeJavaScriptHtml(result.code, {title, imports: result.imports});
+    const variants = [
+      {suffix: '', html: unminified, minified: false},
+      {suffix: '-min', html: await minifyHtml(unminified), minified: true},
+    ];
+    for (const variant of variants) {
+      const id = variant.minified ? `${profile.name}-min` : `${profile.name}-unminified`;
+      const archive = `${stem}.${id}.zip`;
+      const archivePath = join(options.output, archive);
+      const zipBytes = await writeArchive({python, zipTool, output: archivePath, stem, html: variant.html});
+      records.push({
+        id,
+        backend: 'js',
+        precision: result.precision,
+        optimization: variant.minified ? 'terser' : 'none',
+        layout: 'inline',
+        minified: variant.minified,
+        wasmBytes: null,
+        htmlBytes: Buffer.byteLength(variant.html),
+        zipBytes,
+        archive,
+        code: result.code,
+        html: variant.html,
+      });
+    }
+  }
+
+  const select = (items) => items.slice().sort((a, b) => a.zipBytes - b.zipBytes || a.id.localeCompare(b.id))[0];
+  const bestWasm = select(records.filter((candidate) => candidate.backend === 'wasm'));
+  const bestJs = select(records.filter((candidate) => candidate.backend === 'js' && candidate.precision === 'native'));
+  const bestF32 = select(records.filter((candidate) => candidate.backend === 'js' && candidate.precision === 'f32'));
+  const bestOverall = select(records);
+  if (!bestWasm || !bestJs || !bestF32) throw new Error('Build produced no complete backend candidates');
+
+  const wasmPath = join(options.output, `${stem}.wasm`);
+  await writeFile(wasmPath, bestWasm.bytes);
+  await writeFile(join(options.output, `${stem}.html`), bestWasm.html);
+  await copyFile(join(options.output, bestWasm.archive), join(options.output, `${stem}.zip`));
+  await writeFile(join(options.output, `${stem}.js.html`), bestJs.html);
+  await copyFile(join(options.output, bestJs.archive), join(options.output, `${stem}.js.zip`));
+  await writeFile(join(options.output, `${stem}.f32.html`), bestF32.html);
+  await copyFile(join(options.output, bestF32.archive), join(options.output, `${stem}.f32.zip`));
+
+  const wasmDis = configuredExecutable('wasm-dis', process.env.SLIM_WASM_DIS, optimizer);
+  if (!wasmDis) throw new Error('wasm-dis is required to write the selected WAT artifact; set SLIM_WASM_DIS or add wasm-dis to PATH');
+  const watPath = join(options.output, `${stem}.wat`);
+  run(wasmDis, [wasmPath, '-o', watPath], 'wasm-dis');
+  const wat = await readFile(watPath, 'utf8');
+  if (!wat.includes('(module')) throw new Error('wasm-dis did not emit a module WAT artifact');
+
+  const report = {
+    version: 2,
+    source: basename(options.source),
+    stem,
+    title,
+    budget,
+    selected: bestWasm.id,
+    selectedWasm: candidateSummary(bestWasm),
+    selectedJs: candidateSummary(bestJs),
+    selectedF32: candidateSummary(bestF32),
+    selectedOverall: candidateSummary(bestOverall),
+    layout: bestWasm.layout,
+    zipBytes: bestWasm.zipBytes,
+    remaining: budget - bestWasm.zipBytes,
+    artifacts: {
+      wasm: `${stem}.wasm`,
+      wat: `${stem}.wat`,
+      html: `${stem}.html`,
+      js: `${stem}.js`,
+      jsHtml: `${stem}.js.html`,
+      jsZip: `${stem}.js.zip`,
+      f32Js: `${stem}.f32.js`,
+      f32Html: `${stem}.f32.html`,
+      f32Zip: `${stem}.f32.zip`,
+      zip: `${stem}.zip`,
+    },
+    candidates: records.map(candidateSummary),
+  };
+  await writeFile(join(options.output, `${stem}.size.json`), `${JSON.stringify(report, null, 2)}\n`);
+  console.log(JSON.stringify(report, null, 2));
+  if (bestWasm.zipBytes > budget) process.exitCode = 1;
+  if (options.check && process.exitCode) throw new Error('Selected WASM package exceeds the size budget');
+}
+
+await main();

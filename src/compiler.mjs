@@ -630,7 +630,7 @@ function collectFunctionLayout(fn, globalNames) {
   collectStatementExpressions(fn.body);
 
   // Keep this argument as part of the layout helper so the resolver stays the
-  // single place where source names are checked.  Globals are immutable but
+  // single place where source names are checked.  Globals are mutable and
   // are valid expression names.
   void globalNames;
   return {
@@ -795,7 +795,9 @@ function emitModule(program) {
             append(0x20, ...u32(base));
             append(0x20, ...u32(base));
             append(0x20, ...u32(base + 1));
-            append(0x95, 0x90);
+            // f32.trunc is 0x8f.  0x90 is f32.nearest and would make
+            // negative/positive remainders diverge from source `%` semantics.
+            append(0x95, 0x8f);
             append(0x20, ...u32(base + 1), 0x94, 0x93);
             return;
           }
@@ -966,6 +968,18 @@ export function compile(source) {
 }
 
 /**
+ * Parse Slim source into the compiler's small frontend AST.  This is exported
+ * for sibling backends (such as the JavaScript size comparison) so they can
+ * share the language grammar and diagnostics without reimplementing a parser.
+ */
+export function parseProgram(source) {
+  if (typeof source !== "string") {
+    throw new TypeError("Slim compile error: source must be a string");
+  }
+  return new Parser(source).parse();
+}
+
+/**
  * Compile Slim source and return the binary plus small build-time metadata.
  * Metadata is intentionally not encoded into the WebAssembly module.
  */
@@ -973,7 +987,7 @@ export function compileDetailed(source) {
   if (typeof source !== "string") {
     throw new TypeError("Slim compile error: source must be a string");
   }
-  const program = new Parser(source).parse();
+  const program = parseProgram(source);
   return emitModule(program);
 }
 
