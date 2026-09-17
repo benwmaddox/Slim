@@ -1,0 +1,11 @@
+{
+  "name": "slim-game-compiler",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build.mjs examples/rainbow.slim",
+    "test": "node --test",
+    "check": "node tools/build.mjs examples/rainbow.slim --check"
+  }
+}

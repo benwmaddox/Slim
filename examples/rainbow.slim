@@ -1,0 +1,264 @@
+global player_x = 400;
+global player_y = 520;
+global score = 0;
+global state = 0;
+
+global h0_x = 120;
+global h0_y = 20;
+global h1_x = 300;
+global h1_y = -150;
+global h2_x = 510;
+global h2_y = -320;
+global h3_x = 690;
+global h3_y = -490;
+
+global s0_x = 180;
+global s0_y = 160;
+global s1_x = 400;
+global s1_y = 290;
+global s2_x = 620;
+global s2_y = 420;
+global s0_got = 0;
+global s1_got = 0;
+global s2_got = 0;
+
+fn absolute(v) {
+  if (v < 0) {
+    return -v;
+  }
+  return v;
+}
+
+fn clamp(v, lo, hi) {
+  if (v < lo) {
+    return lo;
+  }
+  if (v > hi) {
+    return hi;
+  }
+  return v;
+}
+
+fn touching(ax, ay, bx, by, rx, ry) {
+  if (absolute(ax - bx) < rx && absolute(ay - by) < ry) {
+    return 1;
+  }
+  return 0;
+}
+
+fn rectangle(x, y, w, h, r, g, b) {
+  tri(x - w / 2, y - h / 2, x + w / 2, y - h / 2, x + w / 2, y + h / 2, r, g, b);
+  tri(x - w / 2, y - h / 2, x + w / 2, y + h / 2, x - w / 2, y + h / 2, r, g, b);
+}
+
+fn diamond(x, y, s, r, g, b) {
+  tri(x, y - s, x + s, y, x, y + s, r, g, b);
+  tri(x, y - s, x, y + s, x - s, y, r, g, b);
+}
+
+fn shard(x, y, r, g, b) {
+  diamond(x, y, 15, r, g, b);
+  diamond(x, y, 7, 1, 1, 1);
+}
+
+fn hazard(x, y, s) {
+  tri(x, y - s, x - s, y + s, x + s, y + s, 0.95, 0.12, 0.18);
+  tri(x, y - s / 2, x - s / 2, y + s / 2, x + s / 2, y + s / 2, 1, 0.65, 0.08);
+}
+
+fn player() {
+  tri(player_x, player_y - 22, player_x - 19, player_y + 18, player_x + 19, player_y + 18, 0.18, 0.92, 1);
+  tri(player_x, player_y - 11, player_x - 8, player_y + 10, player_x + 8, player_y + 10, 1, 1, 1);
+  tri(player_x - 18, player_y + 17, player_x - 31, player_y + 28, player_x - 8, player_y + 22, 0.2, 0.5, 1);
+  tri(player_x + 18, player_y + 17, player_x + 31, player_y + 28, player_x + 8, player_y + 22, 0.2, 0.5, 1);
+}
+
+fn background() {
+  rectangle(400, 50, 800, 100, 0.035, 0.03, 0.11);
+  rectangle(400, 150, 800, 100, 0.045, 0.025, 0.14);
+  rectangle(400, 250, 800, 100, 0.06, 0.02, 0.17);
+  rectangle(400, 350, 800, 100, 0.07, 0.018, 0.19);
+  rectangle(400, 450, 800, 100, 0.055, 0.02, 0.16);
+  rectangle(400, 550, 800, 100, 0.04, 0.025, 0.12);
+  tri(0, 600, 400, 150, 800, 600, 0.08, 0.03, 0.2);
+}
+
+fn score_marks() {
+  let i = 0;
+  while (i < score) {
+    rectangle(26 + i * 20, 24, 14, 14, 1, 0.83, 0.16);
+    i = i + 1;
+  }
+  rectangle(400, 24, 600, 4, 0.2, 0.18, 0.4);
+  rectangle(400, 24, score * 200, 4, 0.2, 0.9, 0.8);
+}
+
+fn win_shape() {
+  rectangle(400, 105, 330, 12, 0.95, 0.2, 0.35);
+  rectangle(400, 122, 330, 12, 1, 0.55, 0.1);
+  rectangle(400, 139, 330, 12, 1, 0.88, 0.12);
+  rectangle(400, 156, 330, 12, 0.2, 0.9, 0.4);
+  rectangle(400, 173, 330, 12, 0.15, 0.55, 1);
+  rectangle(400, 190, 330, 12, 0.55, 0.2, 1);
+  diamond(400, 330, 105, 0.2, 1, 0.45);
+  diamond(400, 330, 72, 0.1, 0.15, 0.35);
+  tri(400, 250, 365, 360, 435, 360, 1, 0.9, 0.2);
+  rectangle(400, 470, 180, 16, 0.2, 1, 0.55);
+}
+
+fn loss_shape() {
+  rectangle(400, 105, 330, 12, 1, 0.1, 0.15);
+  rectangle(400, 122, 330, 12, 0.9, 0.05, 0.1);
+  tri(260, 220, 300, 220, 540, 410, 1, 0.08, 0.16);
+  tri(260, 260, 300, 260, 540, 450, 1, 0.08, 0.16);
+  tri(540, 220, 500, 220, 260, 410, 1, 0.08, 0.16);
+  tri(540, 260, 500, 260, 260, 450, 1, 0.08, 0.16);
+  diamond(400, 330, 35, 1, 0.75, 0.08);
+}
+
+fn scene() {
+  background();
+  score_marks();
+  if (state == 0) {
+    if (s0_got == 0) {
+      shard(s0_x, s0_y, 1, 0.15, 0.35);
+    }
+    if (s1_got == 0) {
+      shard(s1_x, s1_y, 0.2, 0.95, 0.4);
+    }
+    if (s2_got == 0) {
+      shard(s2_x, s2_y, 0.65, 0.3, 1);
+    }
+    hazard(h0_x, h0_y, 25);
+    hazard(h1_x, h1_y, 25);
+    hazard(h2_x, h2_y, 25);
+    hazard(h3_x, h3_y, 25);
+    player();
+  }
+  if (state == 1) {
+    win_shape();
+  }
+  if (state == 2) {
+    loss_shape();
+  }
+}
+
+fn reset_hazards() {
+  h0_x = 120;
+  h0_y = 20;
+  h1_x = 300;
+  h1_y = -150;
+  h2_x = 510;
+  h2_y = -320;
+  h3_x = 690;
+  h3_y = -490;
+}
+
+fn init() {
+  player_x = 400;
+  player_y = 520;
+  score = 0;
+  state = 0;
+  s0_got = 0;
+  s1_got = 0;
+  s2_got = 0;
+  reset_hazards();
+}
+
+fn update() {
+  if (input(0) > 0) {
+    player_x = player_x - 4;
+  }
+  if (input(1) > 0) {
+    player_x = player_x + 4;
+  }
+  if (input(2) > 0) {
+    player_y = player_y - 4;
+  }
+  if (input(3) > 0) {
+    player_y = player_y + 4;
+  }
+  if (input(4) > 0) {
+    player_y = player_y - 2;
+  }
+  if (input(5) > 0) {
+    player_y = player_y - 22;
+  }
+  if (input(8) > 0 && input(4) > 0) {
+    player_x = input(6);
+    player_y = input(7);
+  }
+  player_x = clamp(player_x, 28, 772);
+  player_y = clamp(player_y, 78, 570);
+
+  h0_y = h0_y + 2.6;
+  h1_y = h1_y + 3.1;
+  h2_y = h2_y + 3.7;
+  h3_y = h3_y + 4.2;
+  if (h0_y > 640) {
+    h0_y = -40;
+    h0_x = 70 + ((h0_x + 211) % 660);
+  }
+  if (h1_y > 640) {
+    h1_y = -40;
+    h1_x = 70 + ((h1_x + 173) % 660);
+  }
+  if (h2_y > 640) {
+    h2_y = -40;
+    h2_x = 70 + ((h2_x + 137) % 660);
+  }
+  if (h3_y > 640) {
+    h3_y = -40;
+    h3_x = 70 + ((h3_x + 97) % 660);
+  }
+
+  if (state == 0 && touching(player_x, player_y, h0_x, h0_y, 30, 32) == 1) {
+    state = 2;
+    sound(1, 0.45, 0.3);
+  }
+  if (state == 0 && touching(player_x, player_y, h1_x, h1_y, 30, 32) == 1) {
+    state = 2;
+    sound(1, 0.45, 0.3);
+  }
+  if (state == 0 && touching(player_x, player_y, h2_x, h2_y, 30, 32) == 1) {
+    state = 2;
+    sound(1, 0.45, 0.3);
+  }
+  if (state == 0 && touching(player_x, player_y, h3_x, h3_y, 30, 32) == 1) {
+    state = 2;
+    sound(1, 0.45, 0.3);
+  }
+
+  if (state == 0 && s0_got == 0 && touching(player_x, player_y, s0_x, s0_y, 28, 28) == 1) {
+    s0_got = 1;
+    score = score + 1;
+    sound(0, 1.1, 0.2);
+  }
+  if (state == 0 && s1_got == 0 && touching(player_x, player_y, s1_x, s1_y, 28, 28) == 1) {
+    s1_got = 1;
+    score = score + 1;
+    sound(0, 1.35, 0.2);
+  }
+  if (state == 0 && s2_got == 0 && touching(player_x, player_y, s2_x, s2_y, 28, 28) == 1) {
+    s2_got = 1;
+    score = score + 1;
+    sound(0, 1.6, 0.2);
+  }
+  if (state == 0 && score == 3) {
+    state = 1;
+    sound(2, 1.8, 0.3);
+  }
+}
+
+fn frame() {
+  if (input(9) > 0) {
+    init();
+  }
+  if (state == 0) {
+    update();
+  }
+  if (state > 0 && input(5) > 0) {
+    init();
+  }
+  scene();
+}
