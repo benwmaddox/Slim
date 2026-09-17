@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {mkdir, mkdtemp, readFile, rm, stat, writeFile} from 'node:fs/promises';
+import {mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -69,6 +69,7 @@ test('build emits source-named WASM, WAT, JS, and ZIP artifacts with fair size r
     const sourceName = 'small game.slim';
     const source = join(directory, sourceName);
     const output = join(directory, 'dist');
+    const stem = 'small-game';
     const sourceText = `
 global x = 120;
 fn init() { x = 120; }
@@ -77,16 +78,37 @@ fn frame() { tri(x, 100, x + 20, 100, x, 120, 0.2, 0.7, 1); }
     await writeFile(source, sourceText);
     await mkdir(output, {recursive: true});
     await writeFile(join(output, 'keep.txt'), 'preserve this file');
+    const obsolete = [
+      `${stem}.plain.wasm`,
+      `${stem}.Oz.wasm`,
+      `${stem}.plain-embedded.zip`,
+      `${stem}.plain-embedded-min.zip`,
+      `${stem}.plain-external.zip`,
+      `${stem}.plain-external-min.zip`,
+      `${stem}.Oz-embedded.zip`,
+      `${stem}.Oz-embedded-min.zip`,
+      `${stem}.Oz-external.zip`,
+      `${stem}.Oz-external-min.zip`,
+      `${stem}.js-unminified.zip`,
+      `${stem}.js-min.zip`,
+      `${stem}.f32-unminified.zip`,
+      `${stem}.f32-min.zip`,
+    ];
+    for (const name of obsolete) await writeFile(join(output, name), 'obsolete');
+    const otherStem = 'other-game.plain.wasm';
+    await writeFile(join(output, otherStem), 'preserve other source');
     runBuild(source, output);
 
-    const stem = 'small-game';
     const expected = [
       `${stem}.wasm`, `${stem}.wat`, `${stem}.html`, `${stem}.size.json`,
       `${stem}.js`, `${stem}.js.html`, `${stem}.js.zip`,
       `${stem}.f32.js`, `${stem}.f32.html`, `${stem}.f32.zip`, `${stem}.zip`,
     ];
+    const actualNames = (await readdir(output)).sort();
+    assert.deepEqual(actualNames, [...expected, 'keep.txt', otherStem].sort());
     for (const name of expected) assert.ok((await stat(join(output, name))).isFile(), `missing ${name}`);
     assert.equal(await readFile(join(output, 'keep.txt'), 'utf8'), 'preserve this file');
+    assert.equal(await readFile(join(output, otherStem), 'utf8'), 'preserve other source');
     assert.equal((await stat(join(output, 'small-game.wat'))).isFile(), true);
 
     const wasm = await readFile(join(output, `${stem}.wasm`));
@@ -97,9 +119,14 @@ fn frame() { tri(x, 100, x + 20, 100, x, 120, 0.2, 0.7, 1); }
     const report = JSON.parse(await readFile(join(output, `${stem}.size.json`), 'utf8'));
     assert.equal(report.source, sourceName);
     assert.equal(report.stem, stem);
+    assert.equal(report.version, 3);
     assert.equal(report.selectedWasm.backend, 'wasm');
     assert.equal(report.selectedJs.precision, 'native');
     assert.equal(report.selectedF32.precision, 'f32');
+    assert.equal(report.selectedWasm.archive, `${stem}.zip`);
+    assert.equal(report.selectedJs.archive, `${stem}.js.zip`);
+    assert.equal(report.selectedF32.archive, `${stem}.f32.zip`);
+    assert.ok([`${stem}.zip`, `${stem}.js.zip`, `${stem}.f32.zip`].includes(report.selectedOverall.archive));
     assert.ok(report.candidates.some((candidate) => candidate.id === 'plain-embedded'));
     assert.ok(report.candidates.some((candidate) => candidate.id === 'plain-external'));
     assert.ok(report.candidates.some((candidate) => candidate.id === 'js-unminified'));
@@ -107,6 +134,14 @@ fn frame() { tri(x, 100, x + 20, 100, x, 120, 0.2, 0.7, 1); }
     assert.ok(report.candidates.some((candidate) => candidate.id === 'f32-unminified'));
     assert.ok(report.candidates.some((candidate) => candidate.id === 'f32-min'));
     assert.ok(report.candidates.every((candidate) => candidate.zipBytes > 0));
+    const selectedArchives = new Map([
+      [report.selectedWasm.id, report.selectedWasm.archive],
+      [report.selectedJs.id, report.selectedJs.archive],
+      [report.selectedF32.id, report.selectedF32.archive],
+    ]);
+    for (const candidate of report.candidates) {
+      assert.equal(candidate.archive, selectedArchives.get(candidate.id) ?? null, `${candidate.id} archive retention`);
+    }
 
     const wasmZip = inspectZip(join(output, `${stem}.zip`));
     const expectedWasmNames = report.selectedWasm.layout === 'external' ? ['index.html', `${stem}.wasm`] : ['index.html'];
@@ -121,14 +156,15 @@ fn frame() { tri(x, 100, x + 20, 100, x, 120, 0.2, 0.7, 1); }
     assert.deepEqual(f32Zip.names, ['index.html']);
     assert.equal(f32Zip.index, await readFile(join(output, `${stem}.f32.html`), 'utf8'));
 
-    for (const candidate of report.candidates) {
-      const archivePath = join(output, candidate.archive);
-      assert.equal((await stat(archivePath)).size, candidate.zipBytes, `${candidate.id} size record must match archive`);
+    for (const [id, archiveName] of selectedArchives) {
+      const candidate = report.candidates.find((item) => item.id === id);
+      const archivePath = join(output, archiveName);
+      assert.equal((await stat(archivePath)).size, candidate.zipBytes, `${id} size record must match selected archive`);
       const archive = inspectZip(archivePath);
       assert.equal(archive.names.includes(`${stem}.wat`), false);
     }
 
-    const stableNames = expected.concat(report.candidates.map((candidate) => candidate.archive));
+    const stableNames = expected;
     const before = new Map();
     for (const name of stableNames) before.set(name, digest(await readFile(join(output, name))));
     runBuild(source, output);

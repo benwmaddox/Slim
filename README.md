@@ -27,6 +27,9 @@ It selects by complete ZIP size, including archive overhead.
 `rainbow.f32.html` / `rainbow.f32.zip` preserve the WASM numeric behavior.
 Readable generated factories are `rainbow.js` and `rainbow.f32.js`.
 `rainbow.size.json` records every candidate against the 13,312-byte target.
+Only the 11 final files above are retained. Optimizer intermediates and packaging
+candidates are measured in a temporary directory and discarded. Successful builds
+also remove obsolete candidate files for the current source basename.
 Archives use top-level `index.html`, as required by the supplied rules; an
 external WASM layout also contains `rainbow.wasm`. Inspection artifacts and
 development dependencies are excluded.
@@ -34,8 +37,8 @@ development dependencies are excluded.
 Serve the selected output with `python -m http.server 8000 --directory dist`,
 then open `http://localhost:8000/rainbow.html` or `rainbow.js.html`.
 Separate WASM needs HTTP because browsers
-restrict file URL fetching. The `*-embedded.zip` variants are self-contained
-and can be opened directly after extraction.
+restrict file URL fetching. The JavaScript versions are self-contained and can
+be opened directly after extraction.
 
 Optional: put Binaryen's `wasm-opt` on PATH, or set `SLIM_WASM_OPT` to its
 executable. Set `SLIM_WASM_DIS` if the disassembler is not on PATH. The build

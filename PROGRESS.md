@@ -33,6 +33,11 @@ Source-named HTML previews, readable JS factories, final selected WASM disassemb
 minified candidates are compared using actual ZIP sizes; this is not a claim of
 globally optimal compression.
 
+Dist now retains only the 11 selected playable and inspection files. Candidate
+ZIPs and plain/Oz intermediates are temporary; their measurements remain in the
+size report. Successful builds clean obsolete candidates for the same source
+basename while preserving other files.
+
 Two fresh builds produced identical selected archives. SHA256:
 
 ```text
