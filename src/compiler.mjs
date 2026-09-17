@@ -153,7 +153,7 @@ class Lexer {
         continue;
       }
 
-      if ("{}(),;=+-*/%<>!".includes(ch)) {
+      if ("{}[](),;=+-*/%<>!".includes(ch)) {
         this.advance();
         this.tokens.push(this.token("op", ch, line, column));
         continue;
@@ -219,7 +219,9 @@ class Parser {
 
   parse() {
     const globals = [];
+    const arrays = [];
     const globalNames = new Set();
+    const arrayNames = new Set();
     const constants = [];
     const constantNames = new Set();
     const functions = new Map();
@@ -232,17 +234,30 @@ class Parser {
       if (token.value === "const") {
         const constant = this.parseConstant();
         if (constantNames.has(constant.name)) {
-          compileError(`duplicate constant ${JSON.stringify(constant.name)}`, constant.token);
+          const duplicateKind = constant.kind === "array" && arrayNames.has(constant.name) ? "array" : "constant";
+          compileError(`duplicate ${duplicateKind} ${JSON.stringify(constant.name)}`, constant.token);
         }
         constantNames.add(constant.name);
-        constants.push(constant);
+        if (constant.kind === "array") {
+          if (arrayNames.has(constant.name)) {
+            compileError(`duplicate array ${JSON.stringify(constant.name)}`, constant.token);
+          }
+          arrayNames.add(constant.name);
+          arrays.push(constant);
+        } else constants.push(constant);
       } else if (token.value === "global") {
         const global = this.parseGlobal();
         if (globalNames.has(global.name)) {
           compileError(`duplicate global ${JSON.stringify(global.name)}`, global.token);
         }
         globalNames.add(global.name);
-        globals.push(global);
+        if (global.kind === "array") {
+          if (arrayNames.has(global.name)) {
+            compileError(`duplicate array ${JSON.stringify(global.name)}`, global.token);
+          }
+          arrayNames.add(global.name);
+          arrays.push(global);
+        } else globals.push(global);
       } else if (token.value === "fn") {
         const fn = this.parseFunction();
         if (functions.has(fn.name)) {
@@ -257,26 +272,55 @@ class Parser {
       }
     }
 
-    const program = { globals, functions };
-    return constants.length === 0 ? program : lowerConstants(program, constants);
+    const program = {globals, arrays, functions};
+    const lowered = constants.length === 0 ? program : lowerConstants(program, constants);
+    return resolveArrays(lowered);
   }
 
   parseConstant() {
     const token = this.expect("const");
     const name = this.expectIdentifier("constant name");
     this.expect("=");
-    const expression = this.parseExpression();
+    const expression = this.at("[") ? this.parseArrayInitializer() : this.parseExpression();
     this.expect(";");
-    return { kind: "constant", name: name.value, expression, token };
+    return expression.kind === "arrayInitializer"
+      ? {kind: "array", name: name.value, mutable: false, initializer: expression, token}
+      : {kind: "constant", name: name.value, expression, token};
   }
 
   parseGlobal() {
     const token = this.expect("global");
     const name = this.expectIdentifier("global name");
     this.expect("=");
-    const expression = this.parseExpression();
+    const expression = this.at("[") ? this.parseArrayInitializer() : this.parseExpression();
     this.expect(";");
-    return { kind: "global", name: name.value, expression, token };
+    return expression.kind === "arrayInitializer"
+      ? {kind: "array", name: name.value, mutable: true, initializer: expression, token}
+      : {kind: "global", name: name.value, expression, token};
+  }
+
+  parseArrayInitializer() {
+    const token = this.expect("[");
+    const elements = [];
+    let value = null;
+    let repeat = null;
+    if (!this.at("]")) {
+      const first = this.parseExpression();
+      if (this.at(";")) {
+        this.consume();
+        value = first;
+        repeat = this.parseExpression();
+      } else {
+        elements.push(first);
+        while (this.at(",")) {
+          this.consume();
+          if (this.at("]")) break;
+          elements.push(this.parseExpression());
+        }
+      }
+    }
+    this.expect("]");
+    return {kind: "arrayInitializer", elements, value, repeat, token};
   }
 
   parseFunction() {
@@ -374,6 +418,17 @@ class Parser {
       return { kind: "assign", name: name.value, expression, token: name };
     }
 
+    if (token.kind === "id" && this.peek(1).value === "[") {
+      const name = this.consume();
+      this.consume();
+      const index = this.parseExpression();
+      this.expect("]");
+      this.expect("=");
+      const expression = this.parseExpression();
+      this.expect(";");
+      return {kind: "arrayAssign", name: name.value, index, expression, token: name};
+    }
+
     if (this.at(";")) {
       this.consume();
       return { kind: "empty", token };
@@ -419,6 +474,12 @@ class Parser {
     if (token.kind === "id") {
       this.consume();
       if (!this.at("(")) {
+        if (this.at("[")) {
+          this.consume();
+          const index = this.parseExpression();
+          this.expect("]");
+          return {kind: "index", name: token.value, index, token};
+        }
         return { kind: "name", name: token.value, token };
       }
       this.consume();
@@ -511,11 +572,15 @@ function collectFunctionLocalNames(fn) {
 function lowerConstants(program, declarations) {
   const constants = new Map(declarations.map((constant) => [constant.name, constant]));
   const globalNames = new Set(program.globals.map((global) => global.name));
+  const arrayNames = new Set(program.arrays.map((array) => array.name));
   const functionNames = new Set(program.functions.keys());
 
   for (const constant of declarations) {
     if (globalNames.has(constant.name)) {
       compileError(`constant name ${JSON.stringify(constant.name)} collides with a global`, constant.token);
+    }
+    if (arrayNames.has(constant.name)) {
+      compileError(`constant name ${JSON.stringify(constant.name)} collides with an array`, constant.token);
     }
     if (functionNames.has(constant.name)) {
       compileError(`constant name ${JSON.stringify(constant.name)} collides with a function`, constant.token);
@@ -574,6 +639,9 @@ function lowerConstants(program, declarations) {
       case "call":
         expression.args = expression.args.map((argument) => lowerExpression(argument, shadowed));
         return expression;
+      case "index":
+        expression.index = lowerExpression(expression.index, shadowed);
+        return expression;
       default:
         return expression;
     }
@@ -581,6 +649,11 @@ function lowerConstants(program, declarations) {
 
   for (const global of program.globals) {
     global.expression = lowerExpression(global.expression, new Set());
+  }
+  for (const array of program.arrays) {
+    if (array.initializer.value) array.initializer.value = lowerExpression(array.initializer.value, new Set());
+    array.initializer.elements = array.initializer.elements.map((element) => lowerExpression(element, new Set()));
+    if (array.initializer.repeat) array.initializer.repeat = lowerExpression(array.initializer.repeat, new Set());
   }
 
   const lowerStatements = (statements, shadowed) => {
@@ -593,6 +666,10 @@ function lowerConstants(program, declarations) {
           if (!shadowed.has(statement.name) && constants.has(statement.name)) {
             compileError(`cannot assign to constant ${JSON.stringify(statement.name)}`, statement.token);
           }
+          statement.expression = lowerExpression(statement.expression, shadowed);
+          break;
+        case "arrayAssign":
+          statement.index = lowerExpression(statement.index, shadowed);
           statement.expression = lowerExpression(statement.expression, shadowed);
           break;
         case "expr":
@@ -628,6 +705,213 @@ function lowerConstants(program, declarations) {
   return program;
 }
 
+const MAX_ARRAY_ELEMENTS = 65536;
+
+function tryEvalConstant(expression) {
+  if (!expression) return undefined;
+  if (expression.kind === "name" || expression.kind === "call" || expression.kind === "index") return undefined;
+  if (expression.kind === "unary") {
+    if (tryEvalConstant(expression.expression) === undefined) return undefined;
+  } else if (expression.kind === "binary") {
+    if (tryEvalConstant(expression.left) === undefined || tryEvalConstant(expression.right) === undefined) return undefined;
+  } else if (expression.kind !== "num") {
+    return undefined;
+  }
+  return evalConstant(expression);
+}
+
+function validateArrayLength(array, value, total) {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    compileError("array repeat length must be a finite nonnegative integer", array.initializer.repeat?.token ?? array.token);
+  }
+  if (total + value > MAX_ARRAY_ELEMENTS) {
+    compileError(`fixed array element limit is ${MAX_ARRAY_ELEMENTS}`, array.token);
+  }
+  return value;
+}
+
+function validateArrayIndex(array, value, token = array.token) {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0 || value >= array.length) {
+    compileError(`array ${JSON.stringify(array.name)} index is out of bounds for length ${array.length}`, token);
+  }
+  // Preserve the language's useful -0 behavior while keeping metadata and
+  // direct memory offsets deterministic.
+  return value === 0 ? 0 : value;
+}
+
+function resolveArrays(program) {
+  const arrays = new Map(program.arrays.map((array) => [array.name, array]));
+  const globalNames = new Set(program.globals.map((global) => global.name));
+  const functionNames = new Set(program.functions.keys());
+
+  let totalArrayElements = 0;
+  for (const array of program.arrays) {
+    if (globalNames.has(array.name)) {
+      compileError(`array name ${JSON.stringify(array.name)} collides with a global`, array.token);
+    }
+    if (functionNames.has(array.name)) {
+      compileError(`array name ${JSON.stringify(array.name)} collides with a function`, array.token);
+    }
+    if (Object.hasOwn(BUILTINS, array.name)) {
+      compileError(`array name ${JSON.stringify(array.name)} is reserved for a builtin`, array.token);
+    }
+
+    const initializer = array.initializer;
+    let values;
+    if (initializer.repeat) {
+      const count = validateArrayLength(array, evalConstant(
+        initializer.repeat,
+        undefined,
+        "array repeat length must be a finite nonnegative integer",
+      ), totalArrayElements);
+      const value = evalConstant(
+        initializer.value,
+        undefined,
+        "array initializers must be constant numeric expressions",
+      );
+      values = Array.from({length: count}, () => value);
+      array.repeatCount = count;
+    } else {
+      values = initializer.elements.map((element) => evalConstant(
+        element,
+        undefined,
+        "array initializers must be constant numeric expressions",
+      ));
+      if (totalArrayElements + values.length > MAX_ARRAY_ELEMENTS) {
+        compileError(`fixed array element limit is ${MAX_ARRAY_ELEMENTS}`, array.token);
+      }
+      array.repeatCount = null;
+    }
+    array.values = values;
+    array.length = values.length;
+    array.byteLength = values.length * 4;
+    totalArrayElements += values.length;
+  }
+
+  const lowerArrayExpression = (expression, shadowed) => {
+    switch (expression.kind) {
+      case "name":
+        if (!shadowed.has(expression.name) && arrays.has(expression.name)) {
+          compileError(`array ${JSON.stringify(expression.name)} requires an index`, expression.token);
+        }
+        return expression;
+      case "unary":
+        expression.expression = lowerArrayExpression(expression.expression, shadowed);
+        return expression;
+      case "binary":
+        expression.left = lowerArrayExpression(expression.left, shadowed);
+        expression.right = lowerArrayExpression(expression.right, shadowed);
+        return expression;
+      case "call":
+        expression.args = expression.args.map((argument) => lowerArrayExpression(argument, shadowed));
+        return expression;
+      case "index": {
+        expression.index = lowerArrayExpression(expression.index, shadowed);
+        if (shadowed.has(expression.name)) {
+          compileError(`cannot index shadowed scalar ${JSON.stringify(expression.name)}`, expression.token);
+        }
+        const array = arrays.get(expression.name);
+        if (!array) {
+          if (globalNames.has(expression.name)) {
+            compileError(`cannot index scalar ${JSON.stringify(expression.name)}`, expression.token);
+          }
+          compileError(`unknown array ${JSON.stringify(expression.name)}`, expression.token);
+        }
+        expression.arrayName = array.name;
+        const known = tryEvalConstant(expression.index);
+        if (known !== undefined) {
+          expression.indexToken = expression.index.token;
+          expression.constantIndex = validateArrayIndex(array, known, expression.index.token);
+          if (!array.mutable) {
+            return {kind: "num", value: array.values[expression.constantIndex], token: expression.token};
+          }
+        } else {
+          expression.dynamic = true;
+        }
+        return expression;
+      }
+      default:
+        return expression;
+    }
+  };
+
+  for (const global of program.globals) {
+    global.expression = lowerArrayExpression(global.expression, new Set());
+  }
+
+  const lowerStatements = (statements, shadowed) => {
+    for (const statement of statements) {
+      switch (statement.kind) {
+        case "let":
+          statement.expression = lowerArrayExpression(statement.expression, shadowed);
+          break;
+        case "assign":
+          if (!shadowed.has(statement.name) && arrays.has(statement.name)) {
+            compileError(`cannot assign to array ${JSON.stringify(statement.name)}`, statement.token);
+          }
+          statement.expression = lowerArrayExpression(statement.expression, shadowed);
+          break;
+        case "arrayAssign": {
+          statement.index = lowerArrayExpression(statement.index, shadowed);
+          statement.expression = lowerArrayExpression(statement.expression, shadowed);
+          if (shadowed.has(statement.name)) {
+            compileError(`cannot index shadowed scalar ${JSON.stringify(statement.name)}`, statement.token);
+          }
+          const array = arrays.get(statement.name);
+          if (!array) {
+            if (globalNames.has(statement.name)) {
+              compileError(`cannot index scalar ${JSON.stringify(statement.name)}`, statement.token);
+            }
+            compileError(`unknown array ${JSON.stringify(statement.name)}`, statement.token);
+          }
+          if (!array.mutable) {
+            compileError(`cannot assign to constant array ${JSON.stringify(statement.name)}`, statement.token);
+          }
+          statement.arrayName = array.name;
+          const known = tryEvalConstant(statement.index);
+          if (known !== undefined) {
+            statement.indexToken = statement.index.token;
+            statement.constantIndex = validateArrayIndex(array, known, statement.index.token);
+          } else {
+            statement.dynamic = true;
+          }
+          break;
+        }
+        case "expr":
+          statement.expression = lowerArrayExpression(statement.expression, shadowed);
+          break;
+        case "return":
+          if (statement.expression) statement.expression = lowerArrayExpression(statement.expression, shadowed);
+          break;
+        case "if":
+          statement.condition = lowerArrayExpression(statement.condition, shadowed);
+          lowerStatements(statement.thenBlock.body, shadowed);
+          if (statement.elseBlock) lowerStatements(statement.elseBlock.body, shadowed);
+          break;
+        case "while":
+          statement.condition = lowerArrayExpression(statement.condition, shadowed);
+          lowerStatements(statement.body.body, shadowed);
+          break;
+        case "block":
+          lowerStatements(statement.body, shadowed);
+          break;
+        default:
+          break;
+      }
+    }
+  };
+
+  for (const fn of program.functions.values()) {
+    lowerStatements(fn.body, collectFunctionLocalNames(fn));
+  }
+
+  program.arrays = program.arrays.map((array) => ({
+    ...array,
+    values: array.values.slice(),
+  }));
+  return program;
+}
+
 function walkExpression(expression, visitor) {
   visitor(expression);
   if (expression.kind === "unary") {
@@ -637,6 +921,8 @@ function walkExpression(expression, visitor) {
     walkExpression(expression.right, visitor);
   } else if (expression.kind === "call") {
     for (const argument of expression.args) walkExpression(argument, visitor);
+  } else if (expression.kind === "index") {
+    walkExpression(expression.index, visitor);
   }
 }
 
@@ -646,6 +932,10 @@ function walkStatement(statement, visitor) {
     case "let":
     case "assign":
     case "expr":
+      walkExpression(statement.expression, visitor);
+      break;
+    case "arrayAssign":
+      walkExpression(statement.index, visitor);
       walkExpression(statement.expression, visitor);
       break;
     case "return":
@@ -756,6 +1046,7 @@ function collectFunctionLayout(fn, globalNames) {
   collectStatements(fn.body);
 
   const modTemps = new Map();
+  const arrayTemps = new Map();
   let modCount = 0;
   const collectExpression = (expression) => {
     if (expression.kind === "binary") {
@@ -769,12 +1060,19 @@ function collectFunctionLayout(fn, globalNames) {
       collectExpression(expression.expression);
     } else if (expression.kind === "call") {
       for (const argument of expression.args) collectExpression(argument);
+    } else if (expression.kind === "index") {
+      collectExpression(expression.index);
+      if (expression.dynamic) arrayTemps.set(expression, 0);
     }
   };
   const collectStatementExpressions = (statements) => {
     for (const statement of statements) {
       if (statement.kind === "let" || statement.kind === "assign" || statement.kind === "expr") {
         collectExpression(statement.expression);
+      } else if (statement.kind === "arrayAssign") {
+        collectExpression(statement.index);
+        collectExpression(statement.expression);
+        if (statement.dynamic) arrayTemps.set(statement, 0);
       } else if (statement.kind === "return") {
         if (statement.expression) collectExpression(statement.expression);
       } else if (statement.kind === "if") {
@@ -791,14 +1089,22 @@ function collectFunctionLayout(fn, globalNames) {
   };
   collectStatementExpressions(fn.body);
 
+  const arrayTempBase = fn.params.length + declarations.length + modCount * 2;
+  let arrayTempCount = 0;
+  for (const expression of arrayTemps.keys()) {
+    arrayTemps.set(expression, arrayTempBase + arrayTempCount);
+    arrayTempCount += 1;
+  }
+
   // Keep this argument as part of the layout helper so the resolver stays the
   // single place where source names are checked.  Globals are mutable and
   // are valid expression names.
   void globalNames;
   return {
     locals,
-    localCount: declarations.length + fn.params.length + modCount * 2,
+    localCount: declarations.length + fn.params.length + modCount * 2 + arrayTempCount,
     modTemps,
+    arrayTemps,
   };
 }
 
@@ -873,6 +1179,33 @@ function emitModule(program, options = {}) {
   const reachability = prepareReachability(program);
   const importedNames = reachability.importedBuiltins;
 
+  const arrayByName = new Map(program.arrays.map((array) => [array.name, array]));
+  const totalArrayElements = program.arrays.reduce((total, array) => total + array.length, 0);
+  const dynamicArrayNames = new Set();
+  for (const fn of reachability.reachable) {
+    for (const statement of fn.body) {
+      walkStatement(statement, (node) => {
+        if ((node.kind === "index" || node.kind === "arrayAssign") && node.dynamic) {
+          dynamicArrayNames.add(node.arrayName ?? node.name);
+        }
+      });
+    }
+  }
+  const arrayStorage = program.arrays.map((array) => ({
+    declaration: array,
+    materialized: array.mutable || dynamicArrayNames.has(array.name),
+    offset: null,
+  }));
+  const arrayStorageByName = new Map(arrayStorage.map((item) => [item.declaration.name, item]));
+  const scalarMemoryBytes = globalStorage === "memory" ? globals.length * 4 : 0;
+  let nextArrayOffset = scalarMemoryBytes;
+  for (const item of arrayStorage) {
+    if (!item.materialized) continue;
+    item.offset = nextArrayOffset;
+    nextArrayOffset += item.declaration.byteLength;
+  }
+  const allocatedBytes = Math.max(scalarMemoryBytes, nextArrayOffset);
+
   const types = [];
   const typeIndices = new Map();
   const ensureType = (params) => {
@@ -944,6 +1277,8 @@ function emitModule(program, options = {}) {
     fn,
     layout: layouts.get(fn.name),
     globalIndices,
+    arrays: arrayByName,
+    arrayStorage: arrayStorageByName,
     functionIndices,
     importedNames,
   });
@@ -962,6 +1297,9 @@ function emitModule(program, options = {}) {
             append(0x20, ...u32(localIndex));
             return;
           }
+          if (context.arrays.has(node.name)) {
+            compileError(`array ${JSON.stringify(node.name)} requires an index`, node.token);
+          }
           const globalIndex = context.globalIndices.get(node.name);
           if (globalIndex !== undefined) {
             if (globalStorage === "globals") {
@@ -974,6 +1312,9 @@ function emitModule(program, options = {}) {
           compileError(`unknown value ${JSON.stringify(node.name)}`, node.token);
           return;
         }
+        case "index":
+          append(...emitArrayRead(node, context));
+          return;
         case "call": {
           const functionIndex = context.functionIndices.get(node.name);
           const builtinIndex = context.importedNames.indexOf(node.name);
@@ -1060,12 +1401,79 @@ function emitModule(program, options = {}) {
     return code;
   };
 
-  const emitCondition = (expression, context) => [
-    ...emitExpr(expression, context),
-    0x43,
-    ...f32Bytes(0),
-    0x5c,
-  ];
+  function emitArrayInfo(node, context) {
+    const arrayName = node.arrayName ?? node.name;
+    const declaration = context.arrays.get(arrayName);
+    const storage = context.arrayStorage.get(arrayName);
+    if (!declaration || !storage || storage.offset === null) {
+      compileError(`array ${JSON.stringify(arrayName)} has no materialized storage`, node.token);
+    }
+    return {declaration, storage};
+  }
+
+  function appendTrapIf(code, condition) {
+    // A zero-result if containing unreachable is a compact, valid trap block.
+    code.push(...condition, 0x04, 0x40, 0x00, 0x0b);
+  }
+
+  function emitCheckedArrayIndex(node, context, declaration) {
+    const temp = context.layout.arrayTemps.get(node);
+    if (temp === undefined) {
+      compileError("internal error: missing array index temporary", node.token);
+    }
+    const code = [...emitExpr(node.index, context), 0x21, ...u32(temp)];
+    const local = (...bytes) => [0x20, ...u32(temp), ...bytes];
+    appendTrapIf(code, [...local(0x43, ...f32Bytes(0)), 0x5d]);
+    appendTrapIf(code, [...local(), ...local(), 0x5c]);
+    appendTrapIf(code, [...local(), 0x43, ...f32Bytes(declaration.length), 0x60]);
+    appendTrapIf(code, [...local(), ...local(), 0x8f, 0x5c]);
+    code.push(...local(), 0xa8, 0x41, 0x02, 0x74);
+    return code;
+  }
+
+  function emitArrayRead(node, context) {
+    const {declaration, storage} = emitArrayInfo(node, context);
+    if (node.constantIndex !== undefined) {
+      return memoryAccess(0x2a, storage.offset + node.constantIndex * 4);
+    }
+    const code = emitCheckedArrayIndex(node, context, declaration);
+    code.push(0x2a, 0x02, ...u32(storage.offset));
+    return code;
+  }
+
+  const emitCondition = (expression, context) => {
+    const comparisonOpcodes = {
+      "==": 0x5b,
+      "!=": 0x5c,
+      "<": 0x5d,
+      ">": 0x5e,
+      "<=": 0x5f,
+      ">=": 0x60,
+    };
+    const emit = (node) => {
+      if (node.kind === "binary") {
+        if (node.op === "&&" || node.op === "||") {
+          const code = [...emit(node.left), 0x04, 0x7f];
+          if (node.op === "&&") {
+            code.push(...emit(node.right), 0x05, 0x41, 0x00);
+          } else {
+            code.push(0x41, 0x01, 0x05, ...emit(node.right));
+          }
+          code.push(0x0b);
+          return code;
+        }
+        const opcode = comparisonOpcodes[node.op];
+        if (opcode !== undefined) {
+          return [...emitExpr(node.left, context), ...emitExpr(node.right, context), opcode];
+        }
+      }
+      if (node.kind === "unary" && node.op === "!") {
+        return [...emit(node.expression), 0x45];
+      }
+      return [...emitExpr(node, context), 0x43, ...f32Bytes(0), 0x5c];
+    };
+    return emit(expression);
+  };
 
   const emitStatements = (statements, context) => {
     const code = [];
@@ -1091,6 +1499,20 @@ function emitModule(program, options = {}) {
             append(...emitExpr(statement.expression, context), 0x24, ...u32(globalIndex));
           } else {
             append(...memoryStore(globalOffsets.get(statement.name), emitExpr(statement.expression, context)));
+          }
+          break;
+        }
+        case "arrayAssign": {
+          const {declaration, storage} = emitArrayInfo(statement, context);
+          if (statement.constantIndex !== undefined) {
+            append(...memoryStore(
+              storage.offset + statement.constantIndex * 4,
+              emitExpr(statement.expression, context),
+            ));
+          } else {
+            append(...emitCheckedArrayIndex(statement, context, declaration));
+            append(...emitExpr(statement.expression, context));
+            append(0x38, 0x02, ...u32(storage.offset));
           }
           break;
         }
@@ -1144,9 +1566,7 @@ function emitModule(program, options = {}) {
     ...types.flatMap((params) => [0x60, ...u32(params), ...Array(params).fill(F32), 1, F32]),
   ];
   const importPayload = [...u32(importedNames.length), ...imports];
-  const memoryPages = globalStorage === "memory"
-    ? Math.max(1, Math.ceil((globals.length * 4) / 65536))
-    : 1;
+  const memoryPages = Math.max(1, Math.ceil(allocatedBytes / 65536));
   const memoryPayload = [1, 0x00, ...u32(memoryPages)];
   const exportPayload = [
     3,
@@ -1155,6 +1575,10 @@ function emitModule(program, options = {}) {
     ...stringBytes("memory"), 0x02, 0,
   ];
   const codePayload = [...u32(codeBodies.length > 0 ? reachability.reachable.length : 0), ...codeBodies];
+  const dataBytes = [
+    ...(globalStorage === "memory" ? globals.flatMap((global) => f32Bytes(global.value)) : []),
+    ...arrayStorage.flatMap((item) => item.materialized ? item.declaration.values.flatMap((value) => f32Bytes(value)) : []),
+  ];
 
   const bytes = [
     0x00, 0x61, 0x73, 0x6d,
@@ -1169,13 +1593,24 @@ function emitModule(program, options = {}) {
     ...(globalStorage === "globals" && globals.length ? section(6, [...u32(globals.length), ...globalsSection]) : []),
     ...section(7, exportPayload),
     ...section(10, codePayload),
-    ...(globalStorage === "memory" && globals.length ? section(11, [
+    ...(dataBytes.length ? section(11, [
       1,
       0x00, 0x41, 0x00, 0x0b,
-      ...u32(globals.length * 4),
-      ...globals.flatMap((global) => f32Bytes(global.value)),
+      ...u32(dataBytes.length),
+      ...dataBytes,
     ]) : []),
   ];
+
+  const arrayLayout = arrayStorage.map((item) => ({
+    name: item.declaration.name,
+    mutable: item.declaration.mutable,
+    length: item.declaration.length,
+    offset: item.offset,
+    byteOffset: item.offset,
+    byteLength: item.declaration.byteLength,
+    materialized: item.materialized,
+    values: item.declaration.values.slice(),
+  }));
 
   return {
     wasm: Uint8Array.from(bytes),
@@ -1183,6 +1618,12 @@ function emitModule(program, options = {}) {
     functions: reachability.reachable.map((fn) => fn.name),
     globals: globals.map((global) => global.name),
     globalStorage,
+    arrays: arrayLayout,
+    arrayLayout,
+    memoryPages,
+    allocatedBytes,
+    totalArrayElements,
+    maxArrayElements: MAX_ARRAY_ELEMENTS,
     ...(globalStorage === "memory" ? {globalLayout} : {}),
   };
 }

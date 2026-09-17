@@ -18,7 +18,7 @@ import {fileURLToPath} from 'node:url';
 import {compileDetailed} from '../src/compiler.mjs';
 import {makeHtml} from '../src/host.mjs';
 import {minifyHtml} from './minify.mjs';
-import {winningReplay} from './blockbound-replay.mjs';
+import {winningReplay, winColor, lossColor} from './blockbound-replay.mjs';
 
 // This is a bounded, reproducible Binaryen experiment. It deliberately writes
 // only under output/wasm-opt-study and never changes dist or the production
@@ -68,6 +68,17 @@ const sourceDefinitions = [
     sourcePath: join(root, 'examples', 'blockbound.slim'),
     keyboardOnly: true,
     trace: makeBlockboundTrace,
+  },
+  {
+    id: 'shardbound',
+    stem: 'shardbound',
+    title: 'Shardbound',
+    sourcePath: join(root, 'examples', 'shardbound.slim'),
+    keyboardOnly: true,
+    trace: async () => {
+      const replay = await import('./shardbound-replay.mjs');
+      return makePlatformerTrace(replay.winningReplay, {...replay, initialFrame: false});
+    },
   },
 ];
 
@@ -240,6 +251,12 @@ function inputsEqualTrace(trace, label, baseline, candidate) {
     candidate.game.frame();
     const after = candidate.host.events();
     assert.deepEqual(after, before, `${label}: callback mismatch at tick ${tick}`);
+    const checkpoint = trace.checkpoints?.find((item) => item.tick === tick);
+    if (checkpoint) {
+      assert.ok(before.some((event) => event[0] === 'tri' && checkpoint.color.every(
+        (value, index) => Math.abs(event[index + 7] - value) < .01,
+      )), `${label}: ${checkpoint.label} marker missing at tick ${tick}`);
+    }
   }
   return {
     passed: true,
@@ -251,9 +268,13 @@ function inputsEqualTrace(trace, label, baseline, candidate) {
 }
 
 function makeBlockboundTrace() {
-  const inputs = [{}];
+  return makePlatformerTrace(winningReplay, {winColor, lossColor});
+}
+
+function makePlatformerTrace(replay, {initialFrame = true, winColor, lossColor}) {
+  const inputs = initialFrame ? [{}] : [];
   let previousSpace = false;
-  for (const segment of winningReplay) {
+  for (const segment of replay) {
     for (let tick = 0; tick < segment.ticks; tick += 1) {
       const space = segment.keys.includes('Space');
       inputs.push({
@@ -265,11 +286,14 @@ function makeBlockboundTrace() {
       previousSpace = space;
     }
   }
+  const checkpoints = [{tick: inputs.length - 1, color: winColor, label: 'win'}];
   inputs.push({9: 1});
   for (let tick = 0; tick < 600; tick += 1) inputs.push({1: 1});
+  checkpoints.push({tick: inputs.length - 1, color: lossColor, label: 'loss'});
   inputs.push({9: 1});
   return {
     inputs,
+    checkpoints,
     keyboardTicks: inputs.length,
     pointerTicks: 0,
     description: 'initial, winningReplay, restart, right-held loss, restart',
@@ -322,8 +346,8 @@ function makeRainbowTrace() {
   };
 }
 
-function traceFor(definition) {
-  const trace = definition.trace();
+async function traceFor(definition) {
+  const trace = await definition.trace();
   assert.ok(trace.inputs.length >= 600, `${definition.id}: trace must contain at least 600 ticks`);
   return trace;
 }
@@ -447,89 +471,44 @@ function candidateSummary(candidate, gameRoot) {
   };
 }
 
-async function loadOptionalLoopProfile() {
-  const reportPath = join(root, 'output', 'array-study', 'runtime-comparison', 'report.json');
-  const modulePath = join(root, 'output', 'array-study', 'runtime-comparison', 'loop-memory', 'blockbound.wasm');
-  try {
-    const report = JSON.parse(await readFile(reportPath, 'utf8'));
-    const bytes = new Uint8Array(await readFile(modulePath));
-    const loop = report?.profiles?.['loop-memory'];
-    if (!loop || !loop.selectedWasm) throw new Error('array-study report has no loop-memory selected WASM');
-    if (loop.selectedWasm.wasmBytes !== bytes.byteLength) {
-      throw new Error(`array-study selected loop byte count ${loop.selectedWasm.wasmBytes} != ${bytes.byteLength}`);
-    }
-    moduleMetadata(bytes, 'optional loop-memory seed');
-    return {
-      bytes,
-      reportPath: 'output/array-study/runtime-comparison/report.json',
-      modulePath: 'output/array-study/runtime-comparison/loop-memory/blockbound.wasm',
-      source: report.source,
-      selected: loop.selectedWasm,
-    };
-  } catch (error) {
-    if (error?.code === 'ENOENT') return null;
-    throw error;
-  }
-}
-
-async function runDefinition({definition, sourceText, profiles, tools, staging, optionalSeed = null}) {
-  const gameId = optionalSeed ? `${definition.id}-loop-memory` : definition.id;
+async function runDefinition({definition, sourceText, profiles, tools, staging}) {
+  const gameId = definition.id;
   const gameRoot = join(staging, gameId);
   await mkdir(gameRoot, {recursive: true});
-  let plainBytes;
-  let input;
-  if (optionalSeed) {
-    plainBytes = optionalSeed.bytes;
-    input = {
-      kind: 'selected-oz-seed',
-      report: optionalSeed.reportPath,
-      module: optionalSeed.modulePath,
-      source: optionalSeed.source,
-      selected: optionalSeed.selected,
-    };
-  } else {
-    const detailed = compileDetailed(sourceText);
-    plainBytes = detailed.wasm;
-    input = {
-      kind: 'fresh-production-compiler',
-      source: `examples/${basename(definition.sourcePath)}`,
-      compilerImports: detailed.imports,
-      compilerFunctions: detailed.functions,
-      compilerGlobals: detailed.globals,
-    };
-  }
+  const detailed = compileDetailed(sourceText);
+  const plainBytes = detailed.wasm;
+  const input = {
+    kind: 'fresh-production-compiler',
+    source: `examples/${basename(definition.sourcePath)}`,
+    compilerImports: detailed.imports,
+    compilerFunctions: detailed.functions,
+    compilerGlobals: detailed.globals,
+    arrayLayout: detailed.arrayLayout?.map(({values, ...layout}) => layout),
+  };
   const baselineMeta = moduleMetadata(plainBytes, `${gameId}/plain`);
   const baseline = instantiate(plainBytes, definition, `${gameId}/plain`);
-  const trace = traceFor(definition);
-  if (optionalSeed) {
-    const fresh = compileDetailed(sourceText).wasm;
-    const production = instantiate(fresh, definition, `${gameId}/fresh-production`);
-    input.seedParity = inputsEqualTrace(trace, `${gameId}/seed-vs-fresh-production`, production, baseline);
-  }
+  const trace = await traceFor(definition);
   const candidates = [];
   for (const profile of profiles) {
-    const effectiveProfile = optionalSeed && profile.id === 'plain'
-      ? {...profile, id: 'seed', label: 'existing selected Oz seed', kind: 'seed'}
-      : profile;
     let bytes;
     if (profile.kind === 'plain') {
       bytes = plainBytes;
     } else {
-      const inputPath = join(gameRoot, `${definition.stem}.${effectiveProfile.id}.input.wasm`);
-      const outputPath = join(gameRoot, `${definition.stem}.${effectiveProfile.id}.wasm`);
+      const inputPath = join(gameRoot, `${definition.stem}.${profile.id}.input.wasm`);
+      const outputPath = join(gameRoot, `${definition.stem}.${profile.id}.wasm`);
       await writeFile(inputPath, plainBytes);
-      assertNoForbiddenFlags(effectiveProfile.flags, `${gameId}/${effectiveProfile.id}`);
-      run(tools.wasmOpt, [inputPath, ...effectiveProfile.flags, '-o', outputPath], `${gameId}/${effectiveProfile.id} wasm-opt`);
+      assertNoForbiddenFlags(profile.flags, `${gameId}/${profile.id}`);
+      run(tools.wasmOpt, [inputPath, ...profile.flags, '-o', outputPath], `${gameId}/${profile.id} wasm-opt`);
       bytes = new Uint8Array(await readFile(outputPath));
       await rm(inputPath, {force: true});
     }
-    const candidate = await packageCandidate({definition, profile: effectiveProfile, bytes, gameRoot, python: tools.python});
-    const runtime = instantiate(bytes, definition, `${gameId}/${effectiveProfile.id}`);
+    const candidate = await packageCandidate({definition, profile, bytes, gameRoot, python: tools.python});
+    const runtime = instantiate(bytes, definition, `${gameId}/${profile.id}`);
     candidate.pages = runtime.pages;
     candidate.memoryBytes = runtime.memoryBytes;
-    assert.deepEqual(candidate.metadata.imports, baselineMeta.imports, `${gameId}/${effectiveProfile.id}: imports differ from plain`);
-    assert.deepEqual(candidate.metadata.exports, baselineMeta.exports, `${gameId}/${effectiveProfile.id}: exports differ from plain`);
-    assert.equal(candidate.pages, baseline.pages, `${gameId}/${effectiveProfile.id}: pages differ from plain`);
+    assert.deepEqual(candidate.metadata.imports, baselineMeta.imports, `${gameId}/${profile.id}: imports differ from plain`);
+    assert.deepEqual(candidate.metadata.exports, baselineMeta.exports, `${gameId}/${profile.id}: exports differ from plain`);
+    assert.equal(candidate.pages, baseline.pages, `${gameId}/${profile.id}: pages differ from plain`);
     if (profile.kind === 'plain') {
       candidate.parity = {
         passed: true,
@@ -615,7 +594,6 @@ async function main() {
   const help = run(wasmOpt, ['--help'], 'wasm-opt help').stdout;
   const profiles = makeProfiles(help);
   if (profiles.length < 5) throw new Error(`optimizer grid unexpectedly contains only ${profiles.length} profiles`);
-  const optionalLoop = await loadOptionalLoopProfile();
   const staging = await mkdtemp(join(outputParent, '.wasm-opt-study-staging-'));
   let committed = false;
   try {
@@ -623,16 +601,6 @@ async function main() {
     for (const definition of sourceDefinitions) {
       const sourceText = (await readFile(definition.sourcePath, 'utf8')).replace(/\r\n/g, '\n');
       games.push(await runDefinition({definition, sourceText, profiles, tools: {wasmOpt, wasmDis, python}, staging}));
-      if (definition.id === 'blockbound' && optionalLoop) {
-        games.push(await runDefinition({
-          definition,
-          sourceText,
-          profiles,
-          tools: {wasmOpt, wasmDis, python},
-          staging,
-          optionalSeed: optionalLoop,
-        }));
-      }
     }
     const report = {
       version: 1,
@@ -662,21 +630,13 @@ async function main() {
         layouts: ['embedded', 'external'],
         externalArchiveEntries: ['index.html', 'source-named.wasm'],
         compression: 'ZIP_DEFLATED level 9; deflateWasmBytes is Node raw-DEFLATE size and zipWasmDeflateBytes is the exact ZIP entry size',
-        keyboardOnly: {blockbound: true, rainbow: false},
+        keyboardOnly: {blockbound: true, shardbound: true, rainbow: false},
       },
       traces: {
         blockbound: 'winningReplay plus restart/right-held loss/restart, 1706 ticks',
         rainbow: 'deterministic pointer/keyboard mixed fixture, at least 600 ticks',
+        shardbound: 'three-level winningReplay plus restart/right-held loss/restart',
         comparison: 'actual WebAssembly imports e.input/e.tri/e.sound; exact per-tick deepEqual callback arrays',
-      },
-      optionalMemoryLoop: optionalLoop ? {
-        included: true,
-        source: optionalLoop.modulePath,
-        sourceReport: optionalLoop.reportPath,
-        note: 'The existing array-study selected loop module is an Oz seed because compare-enemy-arrays does not expose its fresh plain module. It remains optional and is checked against fresh production Blockbound callbacks.',
-      } : {
-        included: false,
-        note: 'No array-study loop-memory selected module/report was present; production Rainbow and Blockbound remain mandatory.',
       },
       games,
     };

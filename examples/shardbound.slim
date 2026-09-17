@@ -1,0 +1,747 @@
+const LEVEL_COUNT = 3;
+const TERRAIN_COUNT = 32;
+const ENEMY_COUNT = 11;
+const GEM_COUNT = 11;
+const HAZARD_COUNT = 8;
+const ATLAS_STRIDE = 9;
+
+const SOUND_JUMP = 0;
+const SOUND_COLLECT = 1;
+const SOUND_LOSS = 2;
+const SOUND_WIN = 3;
+const SOUND_TRANSITION = 4;
+
+const STATE_PLAYING = 0;
+const STATE_WON = 1;
+const STATE_LOST = 2;
+const STATE_TRANSITION = 3;
+
+const INPUT_LEFT = 0;
+const INPUT_RIGHT = 1;
+const INPUT_ACTION_HELD = 4;
+const INPUT_ACTION_PRESSED = 5;
+const INPUT_RESTART = 9;
+
+const PLAYER_HALF = 18;
+const PLAYER_HEIGHT = 82;
+const LEVEL_TRANSITION_TICKS = 42;
+
+// Every triangle is nine f32 values: three local vertices and one RGB color.
+// The first triangle is the fox's unique warm coat marker used by replays.
+// Parts: coat 0..4, head 5..15, scarf 16..17, feet 18..21, tail 22..26,
+// satchel 27..29, beetle 30..41, fly 42..52.
+const ATLAS = [
+  -14, -59, 13, -59, 12, -28, 0.95, 0.32, 0.1,
+  -14, -59, 12, -28, -16, -28, 0.64, 0.19, 0.1,
+  -9, -56, 8, -56, 3, -37, 1, 0.88, 0.62,
+  8, -54, 20, -37, 10, -34, 1, 0.56, 0.19,
+  -16, -28, 12, -28, 16, -20, 0.16, 0.12, 0.16,
+  -15, -69, -19, -94, -2, -82, 0.64, 0.19, 0.1,
+  0, -79, 10, -99, 16, -73, 1, 0.56, 0.19,
+  -14, -86, -7, -80, -13, -77, 1, 0.88, 0.62,
+  8, -89, 11, -77, 4, -79, 0.64, 0.19, 0.1,
+  -16, -78, 8, -82, 19, -65, 0.93, 0.27, 0.08,
+  -16, -78, 19, -65, -8, -58, 1, 0.56, 0.19,
+  1, -70, 30, -65, 12, -56, 1, 0.88, 0.62,
+  -8, -58, 1, -70, 12, -56, 1, 0.88, 0.62,
+  25, -67, 32, -65, 27, -61, 0.16, 0.12, 0.16,
+  9, -77, 15, -75, 10, -71, 0.16, 0.12, 0.16,
+  -9, -68, -3, -62, -15, -63, 0.64, 0.19, 0.1,
+  -14, -60, 13, -57, 8, -51, 0.08, 0.48, 0.49,
+  -14, -60, -33, -55, -21, -48, 0.08, 0.48, 0.49,
+  -13, -25, -2, -24, -8, -5, 0.64, 0.19, 0.1,
+  -8, -9, -6, 0, -20, 0, 0.16, 0.12, 0.16,
+  3, -25, 13, -24, 13, -5, 0.64, 0.19, 0.1,
+  8, -8, 21, 0, 6, 0, 0.16, 0.12, 0.16,
+  -10, -31, -35, -24, -51, -42, 0.64, 0.19, 0.1,
+  -10, -31, -51, -42, -34, -43, 0.92, 0.25, 0.08,
+  -34, -43, -51, -42, -58, -68, 1, 0.56, 0.19,
+  -58, -68, -51, -42, -42, -50, 1, 0.88, 0.62,
+  -58, -68, -42, -50, -47, -66, 1, 0.88, 0.62,
+  -14, -52, -4, -46, -17, -34, 1, 0.72, 0.2,
+  -17, -34, -4, -46, -6, -33, 0.64, 0.19, 0.1,
+  -13, -49, -5, -46, -10, -41, 1, 0.88, 0.62,
+  -21, -12, -30, 0, -18, -4, 0.16, 0.12, 0.16,
+  -6, -10, -13, 0, -2, -4, 0.16, 0.12, 0.16,
+  9, -10, 14, 0, 19, -4, 0.16, 0.12, 0.16,
+  -26, -12, -15, -30, -2, -8, 0.22, 0.14, 0.29,
+  -15, -30, 8, -31, -2, -8, 0.47, 0.28, 0.57,
+  8, -31, 21, -16, -2, -8, 0.3, 0.18, 0.39,
+  -26, -12, -2, -8, 17, -6, 0.14, 0.1, 0.2,
+  -14, -28, 4, -29, -4, -22, 0.73, 0.48, 0.61,
+  -1, -29, 2, -28, -2, -10, 0.16, 0.12, 0.16,
+  15, -21, 29, -18, 24, -6, 0.16, 0.12, 0.16,
+  23, -16, 28, -16, 25, -12, 1, 0.72, 0.2,
+  23, -20, 29, -34, 31, -20, 0.38, 0.23, 0.43,
+  -5, -15, -31, -35, -25, -10, 0.69, 0.95, 0.91,
+  -5, -15, -25, -10, -12, -5, 0.31, 0.73, 0.75,
+  2, -16, 25, -38, 31, -13, 0.85, 1, 0.92,
+  2, -16, 31, -13, 16, -5, 0.37, 0.79, 0.8,
+  -11, -15, 8, -15, 15, -2, 0.16, 0.12, 0.16,
+  -11, -15, 15, -2, -4, 5, 0.08, 0.36, 0.4,
+  -6, -13, 2, -13, 4, 2, 1, 0.72, 0.2,
+  8, -17, 20, -13, 17, -2, 0.13, 0.51, 0.52,
+  14, -14, 20, -12, 16, -8, 1, 0.88, 0.62,
+  -3, 2, -9, 13, 1, 6, 0.16, 0.12, 0.16,
+  4, 3, 10, 13, 10, 4, 0.16, 0.12, 0.16
+];
+
+// One compact rectangle definition drives surface(), terrain_collision(),
+// and terrain_scene(). The coordinates are local to each 1,000+ unit level.
+const TERRAIN_LEVEL = [
+  0, 0, 0, 0, 0, 0, 0, 0, 0,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2
+];
+const TERRAIN_LEFT = [
+  0, 480, 1050, 280, 650, 850, 1090, 1240, 1380,
+  0, 370, 850, 1200, 220, 470, 680, 960, 1120, 1320,
+  0, 320, 700, 990, 1350, 150, 430, 600, 790, 1080, 1240, 1450, 1580
+];
+const TERRAIN_TOP = [
+  500, 500, 500, 380, 350, 420, 360, 320, 400,
+  500, 500, 500, 500, 400, 320, 390, 280, 350, 300,
+  500, 500, 500, 500, 500, 390, 300, 420, 340, 260, 360, 300, 240
+];
+const TERRAIN_WIDTH = [
+  480, 500, 450, 140, 110, 120, 100, 100, 100,
+  300, 390, 250, 400, 140, 140, 140, 120, 120, 130,
+  240, 280, 180, 260, 400, 130, 130, 120, 170, 120, 140, 120, 100
+];
+const TERRAIN_BOTTOM = [
+  600, 600, 600, 408, 378, 448, 388, 348, 428,
+  600, 600, 600, 600, 428, 348, 418, 308, 378, 328,
+  600, 600, 600, 600, 600, 418, 328, 448, 368, 288, 388, 328, 268
+];
+const TERRAIN_KIND = [
+  0, 0, 0, 1, 1, 1, 1, 1, 1,
+  0, 0, 0, 0, 1, 1, 1, 1, 1, 1,
+  0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1
+];
+
+const LEVEL_LENGTH = [1500, 1600, 1750];
+const LEVEL_EXIT_X = [1390, 1500, 1660];
+const LEVEL_REQUIRED_GEMS = [2, 3, 3];
+const LEVEL_START_X = [120, 120, 120];
+const LEVEL_SKY_R = [0.49, 0.12, 0.08];
+const LEVEL_SKY_G = [0.79, 0.56, 0.13];
+const LEVEL_SKY_B = [0.92, 0.85, 0.44];
+const LEVEL_GROUND_R = [0.20, 0.11, 0.18];
+const LEVEL_GROUND_G = [0.45, 0.34, 0.25];
+const LEVEL_GROUND_B = [0.28, 0.27, 0.23];
+
+const ENEMY_LEVEL = [0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2];
+const ENEMY_START_X = [590, 910, 1280, 450, 790, 1030, 1370, 520, 840, 1260, 1510];
+const ENEMY_Y = [500, 420, 345, 400, 390, 255, 295, 300, 340, 255, 300];
+const ENEMY_TYPE = [0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0];
+const ENEMY_PATROL = [42, 38, 0, 44, 46, 0, 0, 38, 44, 0, 42];
+
+const GEM_LEVEL = [0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2];
+const GEM_X = [350, 720, 1160, 285, 540, 1000, 1380, 220, 500, 1130, 1510];
+const GEM_Y = [360, 300, 310, 355, 270, 230, 250, 350, 250, 210, 250];
+
+const HAZARD_LEVEL = [0, 0, 1, 1, 2, 2, 2, 2];
+const HAZARD_X = [515, 1018, 335, 820, 280, 630, 950, 1320];
+const HAZARD_Y = [500, 500, 500, 500, 500, 500, 500, 500];
+const HAZARD_WIDTH = [42, 34, 38, 44, 38, 42, 46, 38];
+
+global player_x = 120;
+global player_y = 500;
+global player_vx = 0;
+global player_vy = 0;
+global player_ground = 1;
+global player_facing = 1;
+global player_pose = 0;
+global jump_hold = 0;
+global current_level = 0;
+global camera_x = 0;
+global state = STATE_PLAYING;
+global transition_timer = 0;
+global gem_count = 0;
+global walk_clock = 0;
+global enemy_clock = 0;
+global enemy_x = [0; ENEMY_COUNT];
+global enemy_dir = [1; ENEMY_COUNT];
+global enemy_alive = [1; ENEMY_COUNT];
+global gem_taken = [0; GEM_COUNT];
+
+fn absolute(value) {
+  if (value < 0) {
+    return -value;
+  }
+  return value;
+}
+
+fn clamp(value, low, high) {
+  if (value < low) {
+    return low;
+  }
+  if (value > high) {
+    return high;
+  }
+  return value;
+}
+
+fn visible(left, right) {
+  if (right > camera_x - 50 && left < camera_x + 850) {
+    return 1;
+  }
+  return 0;
+}
+
+// The atlas is world independent. A small shear gives walk and jump poses
+// without duplicating geometry. A negative flip mirrors the fox horizontally.
+fn draw_part(start, count, x, y, scale, flip, tilt) {
+  let i = start;
+  while (i < start + count) {
+    let base = i * ATLAS_STRIDE;
+    let ax1 = ATLAS[base];
+    let ay1 = ATLAS[base + 1];
+    let ax2 = ATLAS[base + 2];
+    let ay2 = ATLAS[base + 3];
+    let ax3 = ATLAS[base + 4];
+    let ay3 = ATLAS[base + 5];
+    let x1 = x + ax1 * scale * flip - camera_x;
+    let y1 = y + (ay1 + ax1 * tilt) * scale;
+    let x2 = x + ax2 * scale * flip - camera_x;
+    let y2 = y + (ay2 + ax2 * tilt) * scale;
+    let x3 = x + ax3 * scale * flip - camera_x;
+    let y3 = y + (ay3 + ax3 * tilt) * scale;
+    tri(x1, y1, x2, y2, x3, y3, ATLAS[base + 6], ATLAS[base + 7], ATLAS[base + 8]);
+    i = i + 1;
+  }
+}
+
+fn hero(x, y, facing, pose) {
+  let tilt = 0;
+  if (pose == 1) {
+    tilt = 0.07;
+  }
+  if (pose == 2) {
+    tilt = -0.04;
+  }
+  draw_part(22, 5, x, y, 1, facing, tilt);
+  draw_part(18, 4, x, y, 1, facing, tilt);
+  draw_part(0, 5, x, y, 1, facing, tilt);
+  draw_part(5, 11, x, y, 1, facing, tilt);
+  draw_part(16, 2, x, y, 1, facing, tilt);
+  draw_part(27, 3, x, y, 1, facing, tilt);
+}
+
+fn beetle(x, y, phase) {
+  let lean = 0;
+  if (phase == 1) {
+    lean = 0.08;
+  }
+  draw_part(30, 12, x, y, 0.85, 1, lean);
+}
+
+fn fly(x, y, phase) {
+  let lean = -0.04;
+  if (phase == 1) {
+    lean = 0.04;
+  }
+  draw_part(42, 11, x, y, 0.90, 1, lean);
+}
+
+fn surface(x, previous) {
+  let top = -1000;
+  let i = 0;
+  while (i < TERRAIN_COUNT) {
+    if (TERRAIN_LEVEL[i] == current_level && x >= TERRAIN_LEFT[i] && x < TERRAIN_LEFT[i] + TERRAIN_WIDTH[i] && previous <= TERRAIN_TOP[i]) {
+      if (top < -500 || TERRAIN_TOP[i] < top) {
+        top = TERRAIN_TOP[i];
+      }
+    }
+    i = i + 1;
+  }
+  return top;
+}
+
+// The exact same rectangle arrays used for rendering also stop wall and
+// ceiling crossings. Floors remain valid under raised platforms.
+fn terrain_collision(index, old_x, old_y) {
+  let left = TERRAIN_LEFT[index];
+  let right = left + TERRAIN_WIDTH[index];
+  let top = TERRAIN_TOP[index];
+  let bottom = TERRAIN_BOTTOM[index];
+  if (player_y > top + 2 && player_y - PLAYER_HEIGHT < bottom) {
+    if (old_x <= left - PLAYER_HALF && player_x > left - PLAYER_HALF) {
+      player_x = left - PLAYER_HALF;
+      player_vx = 0;
+    }
+    if (old_x >= right + PLAYER_HALF && player_x < right + PLAYER_HALF) {
+      player_x = right + PLAYER_HALF;
+      player_vx = 0;
+    }
+  }
+  if (player_vy < 0 && player_x > left - PLAYER_HALF && player_x < right + PLAYER_HALF && old_y - PLAYER_HEIGHT >= bottom && player_y - PLAYER_HEIGHT < bottom) {
+    player_y = bottom + PLAYER_HEIGHT;
+    player_vy = 0;
+  }
+}
+
+fn terrain_collisions(old_x, old_y) {
+  let i = 0;
+  while (i < TERRAIN_COUNT) {
+    if (TERRAIN_LEVEL[i] == current_level) {
+      terrain_collision(i, old_x, old_y);
+    }
+    i = i + 1;
+  }
+}
+
+fn background() {
+  let sky_r = LEVEL_SKY_R[current_level];
+  let sky_g = LEVEL_SKY_G[current_level];
+  let sky_b = LEVEL_SKY_B[current_level];
+  tri(0, 0, 800, 0, 800, 600, sky_r, sky_g, sky_b);
+  tri(0, 0, 800, 600, 0, 600, sky_r, sky_g, sky_b);
+  if (current_level == 0) {
+    tri(0, 445, 170, 255, 345, 445, 0.18, 0.43, 0.35);
+    tri(270, 445, 480, 220, 700, 445, 0.15, 0.35, 0.30);
+    tri(600, 445, 760, 285, 920, 445, 0.22, 0.48, 0.35);
+    tri(54, 155, 88, 116, 122, 155, 1, 0.91, 0.52);
+  }
+  if (current_level == 1) {
+    tri(0, 430, 130, 180, 260, 430, 0.07, 0.29, 0.34);
+    tri(200, 430, 420, 250, 640, 430, 0.08, 0.35, 0.36);
+    tri(540, 430, 710, 150, 880, 430, 0.05, 0.25, 0.31);
+    tri(90, 96, 122, 59, 154, 96, 0.98, 0.79, 0.30);
+  }
+  if (current_level == 2) {
+    tri(0, 450, 170, 245, 340, 450, 0.25, 0.19, 0.25);
+    tri(270, 450, 485, 165, 700, 450, 0.28, 0.22, 0.27);
+    tri(590, 450, 760, 260, 930, 450, 0.20, 0.16, 0.24);
+    tri(650, 110, 686, 70, 722, 110, 0.98, 0.70, 0.31);
+  }
+}
+
+fn terrain_piece(index) {
+  let left = TERRAIN_LEFT[index];
+  let right = left + TERRAIN_WIDTH[index];
+  let top = TERRAIN_TOP[index];
+  if (visible(left, right) == 1) {
+    let a = left - camera_x;
+    let b = right - camera_x;
+    let ground_r = LEVEL_GROUND_R[current_level];
+    let ground_g = LEVEL_GROUND_G[current_level];
+    let ground_b = LEVEL_GROUND_B[current_level];
+    tri(a, top, b, top, b, TERRAIN_BOTTOM[index], ground_r, ground_g, ground_b);
+    tri(a, top, b, TERRAIN_BOTTOM[index], a, TERRAIN_BOTTOM[index], ground_r * 0.70, ground_g * 0.70, ground_b * 0.78);
+    if (TERRAIN_KIND[index] == 0) {
+      tri(a, top, b, top, b, top + 12, 0.58, 0.78, 0.31);
+      tri(a, top, b, top + 12, a, top + 12, 0.31, 0.57, 0.25);
+    } else {
+      tri(a, top, b, top, b, top + 8, 0.91, 0.66, 0.24);
+      tri(a, top, b, top + 8, a, top + 8, 0.57, 0.29, 0.18);
+    }
+  }
+}
+
+fn terrain_scene() {
+  let i = 0;
+  while (i < TERRAIN_COUNT) {
+    if (TERRAIN_LEVEL[i] == current_level) {
+      terrain_piece(i);
+    }
+    i = i + 1;
+  }
+}
+
+fn gem(x, y, taken) {
+  let sx = x - camera_x;
+  if (taken == 0 && visible(x - 24, x + 24) == 1) {
+    tri(sx, y - 18, sx + 16, y, sx, y + 18, 0.30, 0.95, 0.88);
+    tri(sx, y - 18, sx, y + 18, sx - 16, y, 0.86, 0.99, 0.51);
+    tri(sx, y - 11, sx + 7, y, sx, y + 8, 0.98, 1, 0.77);
+  }
+}
+
+fn gems_scene() {
+  let i = 0;
+  while (i < GEM_COUNT) {
+    if (GEM_LEVEL[i] == current_level) {
+      gem(GEM_X[i], GEM_Y[i], gem_taken[i]);
+    }
+    i = i + 1;
+  }
+}
+
+fn hazard(x, y, width) {
+  let sx = x - camera_x;
+  if (visible(x - width, x + width) == 1) {
+    tri(sx - width, y, sx, y - 32, sx + width, y, 0.87, 0.15, 0.17);
+    tri(sx - width, y, sx, y - 32, sx - width + 8, y, 0.98, 0.54, 0.22);
+  }
+}
+
+fn hazards_scene() {
+  let i = 0;
+  while (i < HAZARD_COUNT) {
+    if (HAZARD_LEVEL[i] == current_level) {
+      hazard(HAZARD_X[i], HAZARD_Y[i], HAZARD_WIDTH[i]);
+    }
+    i = i + 1;
+  }
+}
+
+fn exit_gate() {
+  let x = LEVEL_EXIT_X[current_level];
+  let sx = x - camera_x;
+  let unlocked = 0;
+  if (gem_count >= LEVEL_REQUIRED_GEMS[current_level]) {
+    unlocked = 1;
+  }
+  if (visible(x - 38, x + 38) == 1) {
+    tri(sx - 32, 500, sx - 32, 390, sx, 360, 0.24, 0.17, 0.20);
+    tri(sx - 32, 500, sx, 360, sx + 32, 500, 0.11, 0.08, 0.13);
+    if (unlocked == 1) {
+      tri(sx - 23, 490, sx, 388, sx + 23, 490, 0.33, 0.95, 0.55);
+      tri(sx - 13, 474, sx, 412, sx + 13, 474, 0.95, 0.86, 0.31);
+    } else {
+      tri(sx - 23, 490, sx, 388, sx + 23, 490, 0.90, 0.20, 0.22);
+    }
+  }
+}
+
+fn enemies_scene() {
+  let i = 0;
+  while (i < ENEMY_COUNT) {
+    if (ENEMY_LEVEL[i] == current_level && enemy_alive[i] == 1) {
+      let phase = enemy_clock % 2;
+      let y = ENEMY_Y[i];
+      if (ENEMY_TYPE[i] == 0) {
+        beetle(enemy_x[i], y, phase);
+      } else {
+        y = y + (enemy_clock % 40 - 20) * 0.45;
+        fly(enemy_x[i], y, phase);
+      }
+    }
+    i = i + 1;
+  }
+}
+
+fn hud() {
+  let required = LEVEL_REQUIRED_GEMS[current_level];
+  let progress = gem_count * 46;
+  tri(18, 18, 782, 18, 782, 49, 0.08, 0.06, 0.12);
+  tri(18, 18, 782, 49, 18, 49, 0.12, 0.08, 0.16);
+  tri(30, 33, 130, 33, 130, 40, 0.23, 0.18, 0.24);
+  tri(30, 33, 130, 40, 30, 40, 0.91, 0.67, 0.22);
+  tri(138, 33, 138 + progress, 33, 138 + progress, 40, 0.30, 0.95, 0.72);
+  tri(138, 33, 138 + progress, 40, 138, 40, 0.94, 0.98, 0.44);
+  let i = 0;
+  while (i < 3) {
+    let px = 610 + i * 38;
+    if (i < current_level) {
+      tri(px, 39, px + 14, 25, px + 28, 39, 0.31, 0.95, 0.57);
+    } else if (i == current_level) {
+      tri(px, 39, px + 14, 25, px + 28, 39, 0.98, 0.74, 0.28);
+    } else {
+      tri(px, 39, px + 14, 25, px + 28, 39, 0.25, 0.21, 0.28);
+    }
+    i = i + 1;
+  }
+  // Tiny gem pips keep the requirement visible without a text dependency.
+  i = 0;
+  while (i < required) {
+    let gem_px = 190 + i * 28;
+    if (i < gem_count) {
+      tri(gem_px, 32, gem_px + 8, 24, gem_px + 16, 32, 0.37, 0.98, 0.84);
+      tri(gem_px, 32, gem_px + 16, 32, gem_px + 8, 41, 0.98, 0.92, 0.39);
+    } else {
+      tri(gem_px, 32, gem_px + 8, 24, gem_px + 16, 32, 0.30, 0.24, 0.32);
+    }
+    i = i + 1;
+  }
+}
+
+fn overlay_panel(red, green, blue) {
+  tri(130, 190, 670, 190, 670, 405, red, green, blue);
+  tri(130, 190, 670, 405, 130, 405, red * 0.78, green * 0.78, blue * 0.82);
+}
+
+fn transition_scene() {
+  overlay_panel(0.10, 0.08, 0.16);
+  let i = 0;
+  while (i < current_level + 1) {
+    let px = 330 + i * 58;
+    tri(px, 300, px + 24, 270, px + 48, 300, 0.32, 0.95, 0.65);
+    tri(px, 300, px + 48, 300, px + 24, 330, 0.98, 0.78, 0.25);
+    i = i + 1;
+  }
+}
+
+fn terminal_win() {
+  overlay_panel(0.08, 0.18, 0.16);
+  tri(400, 215, 475, 350, 325, 350, 0.26, 0.98, 0.61);
+  tri(400, 245, 445, 326, 355, 326, 0.98, 0.90, 0.31);
+  tri(280, 395, 330, 365, 380, 395, 0.98, 0.69, 0.25);
+  tri(420, 395, 470, 365, 520, 395, 0.98, 0.69, 0.25);
+}
+
+fn terminal_loss() {
+  overlay_panel(0.20, 0.07, 0.12);
+  tri(300, 240, 350, 240, 500, 370, 0.96, 0.16, 0.24);
+  tri(500, 240, 450, 240, 300, 370, 0.96, 0.16, 0.24);
+  tri(400, 250, 440, 320, 360, 320, 0.99, 0.58, 0.20);
+}
+
+fn scene() {
+  background();
+  if (state == STATE_PLAYING || state == STATE_TRANSITION) {
+    terrain_scene();
+    hazards_scene();
+    gems_scene();
+    enemies_scene();
+    exit_gate();
+    hero(player_x, player_y, player_facing, player_pose);
+    hud();
+  }
+  if (state == STATE_TRANSITION) {
+    transition_scene();
+  }
+  if (state == STATE_WON) {
+    terminal_win();
+  }
+  if (state == STATE_LOST) {
+    terminal_loss();
+  }
+}
+
+fn reset_gems() {
+  let i = 0;
+  while (i < GEM_COUNT) {
+    gem_taken[i] = 0;
+    i = i + 1;
+  }
+}
+
+fn reset_enemies() {
+  let i = 0;
+  while (i < ENEMY_COUNT) {
+    enemy_x[i] = ENEMY_START_X[i];
+    enemy_dir[i] = 1;
+    enemy_alive[i] = 1;
+    i = i + 1;
+  }
+}
+
+fn reset_level() {
+  player_x = LEVEL_START_X[current_level];
+  player_y = 500;
+  player_vx = 0;
+  player_vy = 0;
+  player_ground = 1;
+  player_facing = 1;
+  player_pose = 0;
+  jump_hold = 0;
+  camera_x = 0;
+  state = STATE_PLAYING;
+  transition_timer = 0;
+  gem_count = 0;
+  reset_gems();
+  reset_enemies();
+}
+
+fn init() {
+  current_level = 0;
+  walk_clock = 0;
+  enemy_clock = 0;
+  reset_level();
+}
+
+fn collect_gems() {
+  let i = 0;
+  while (i < GEM_COUNT) {
+    if (GEM_LEVEL[i] == current_level && gem_taken[i] == 0 && absolute(player_x - GEM_X[i]) < 30 && absolute(player_y - GEM_Y[i]) < 52) {
+      gem_taken[i] = 1;
+      gem_count = gem_count + 1;
+      sound(SOUND_COLLECT, 10 + gem_count * 2, 0.07);
+    }
+    i = i + 1;
+  }
+}
+
+fn lose() {
+  if (state == STATE_PLAYING) {
+    state = STATE_LOST;
+    sound(SOUND_LOSS, -5, 0.18);
+  }
+}
+
+fn check_hazards() {
+  let i = 0;
+  while (i < HAZARD_COUNT) {
+    if (HAZARD_LEVEL[i] == current_level && absolute(player_x - HAZARD_X[i]) < HAZARD_WIDTH[i] + PLAYER_HALF && absolute(player_y - HAZARD_Y[i]) < 66) {
+      lose();
+    }
+    i = i + 1;
+  }
+}
+
+fn check_enemy_hit(index, y) {
+  if (absolute(player_x - enemy_x[index]) < 34 && absolute(player_y - y) < 34) {
+    if (player_vy > 0 && player_y - player_vy < y - 20) {
+      enemy_alive[index] = 0;
+      player_vy = -9;
+      sound(SOUND_COLLECT, 5, 0.09);
+    } else {
+      lose();
+    }
+  }
+}
+
+fn update_enemies() {
+  let i = 0;
+  while (i < ENEMY_COUNT) {
+    if (ENEMY_LEVEL[i] == current_level && enemy_alive[i] == 1) {
+      if (ENEMY_TYPE[i] == 0) {
+        enemy_x[i] = enemy_x[i] + enemy_dir[i] * 0.62;
+        if (enemy_x[i] > ENEMY_START_X[i] + ENEMY_PATROL[i]) {
+          enemy_dir[i] = -1;
+        }
+        if (enemy_x[i] < ENEMY_START_X[i] - ENEMY_PATROL[i]) {
+          enemy_dir[i] = 1;
+        }
+        check_enemy_hit(i, ENEMY_Y[i]);
+      } else {
+        let fly_y = ENEMY_Y[i] + (enemy_clock % 40 - 20) * 0.45;
+        check_enemy_hit(i, fly_y);
+      }
+    }
+    i = i + 1;
+  }
+}
+
+fn advance_level() {
+  if (current_level + 1 >= LEVEL_COUNT) {
+    state = STATE_WON;
+    sound(SOUND_WIN, 12, 0.20);
+  } else {
+    current_level = current_level + 1;
+    player_x = LEVEL_START_X[current_level];
+    player_y = 500;
+    player_vx = 0;
+    player_vy = 0;
+    player_ground = 1;
+    player_facing = 1;
+    player_pose = 0;
+    camera_x = 0;
+    gem_count = 0;
+    transition_timer = 0;
+    state = STATE_PLAYING;
+    reset_gems();
+    reset_enemies();
+  }
+}
+
+fn update_transition() {
+  transition_timer = transition_timer - 1;
+  if (transition_timer <= 0) {
+    advance_level();
+  }
+}
+
+fn update_player() {
+  let direction = 0;
+  if (input(INPUT_LEFT) > 0) {
+    direction = direction - 1;
+  }
+  if (input(INPUT_RIGHT) > 0) {
+    direction = direction + 1;
+  }
+  if (direction != 0) {
+    player_vx = player_vx + direction * 0.70;
+    player_facing = direction;
+  } else {
+    player_vx = player_vx * 0.78;
+  }
+  player_vx = clamp(player_vx, -6, 6);
+  if (input(INPUT_ACTION_PRESSED) > 0 && player_ground == 1) {
+    player_vy = -15;
+    player_ground = 0;
+    jump_hold = 8;
+    sound(SOUND_JUMP, 8, 0.08);
+  }
+  if (input(INPUT_ACTION_HELD) > 0 && player_vy < 0 && jump_hold > 0) {
+    player_vy = player_vy - 0.28;
+    jump_hold = jump_hold - 1;
+  } else {
+    jump_hold = 0;
+  }
+  player_vy = clamp(player_vy + 0.72, -16, 15);
+  let old_x = player_x;
+  let old_y = player_y;
+  player_x = clamp(player_x + player_vx, PLAYER_HALF, LEVEL_LENGTH[current_level] - PLAYER_HALF);
+  player_y = player_y + player_vy;
+  terrain_collisions(old_x, old_y);
+  let top = surface(player_x, old_y);
+  if (player_vy >= 0 && top > -500 && old_y <= top && player_y >= top) {
+    player_y = top;
+    player_vy = 0;
+    player_ground = 1;
+  } else {
+    player_ground = 0;
+  }
+  if (player_y > 660) {
+    lose();
+  }
+  collect_gems();
+  check_hazards();
+  update_enemies();
+  if (player_x > LEVEL_EXIT_X[current_level] && gem_count >= LEVEL_REQUIRED_GEMS[current_level] && state == STATE_PLAYING) {
+    state = STATE_TRANSITION;
+    transition_timer = LEVEL_TRANSITION_TICKS;
+    sound(SOUND_TRANSITION, 7, 0.14);
+  }
+}
+
+fn update_camera() {
+  if (player_x - camera_x > 280) {
+    camera_x = player_x - 280;
+  }
+  if (camera_x < 0) {
+    camera_x = 0;
+  }
+  if (camera_x > LEVEL_LENGTH[current_level] - 800) {
+    camera_x = LEVEL_LENGTH[current_level] - 800;
+  }
+  if (camera_x < 0) {
+    camera_x = 0;
+  }
+}
+
+fn update() {
+  walk_clock = walk_clock + 1;
+  if (walk_clock > 10000) {
+    walk_clock = 0;
+  }
+  enemy_clock = enemy_clock + 1;
+  if (enemy_clock > 10000) {
+    enemy_clock = 0;
+  }
+  update_player();
+  update_camera();
+  if (player_ground == 0) {
+    player_pose = 2;
+  } else if (absolute(player_vx) > 0.20) {
+    player_pose = walk_clock % 2;
+  } else {
+    player_pose = 0;
+  }
+}
+
+fn frame() {
+  if (input(INPUT_RESTART) > 0) {
+    init();
+  } else if (state == STATE_PLAYING) {
+    update();
+  } else if (state == STATE_TRANSITION) {
+    update_transition();
+  } else if (state == STATE_LOST && input(INPUT_ACTION_PRESSED) > 0) {
+    reset_level();
+  }
+  scene();
+}

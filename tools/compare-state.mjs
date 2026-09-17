@@ -298,6 +298,7 @@ async function main() {
         globalStorage: storage,
         globalCount: result.detailed.globals.length,
         globalLayout: result.detailed.globalLayout ?? null,
+        arrayLayout: result.detailed.arrayLayout?.map(({values, ...layout}) => layout) ?? null,
         plain: optimizationSummary(result.candidates.filter((candidate) => candidate.optimization === 'plain')),
         Oz: oz ? optimizationSummary(result.candidates.filter((candidate) => candidate.optimization === 'Oz')) : null,
         selected: candidateSummary(result.selected),

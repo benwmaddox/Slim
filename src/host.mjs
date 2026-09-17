@@ -132,34 +132,88 @@ function draw() {
 // Sound pitch is a semitone offset from 220 Hz. Gain is 0..1; zero is silent.
 function soundHost() {
   return `
-var ac;
+var ac, voices = [], presets = [
+  [[0, 7, 0, .14, 1, .85]],
+  [[12, -2, 0, .15, 1, .72], [19, -4, .035, .12, 0, .42]],
+  [[0, -12, 0, .25, 3, .82]],
+  [[0, 0, 0, .34, 0, .52], [4, 0, .055, .32, 0, .48], [7, 0, .11, .30, 1, .42], [12, 0, .165, .28, 0, .32]],
+  [[7, 4, 0, .20, 1, .52], [12, 0, .07, .24, 0, .38]]
+], waves = ['sine', 'triangle', 'square', 'sawtooth'];
 function unlock() {
   var A = window.AudioContext || window.webkitAudioContext;
   if (!A) return;
   try {
     ac || (ac = new A);
-    ac.resume();
+    if (ac.resume) ac.resume();
   } catch (e) {}
 }
+function forget(x) {
+  if (!x || x.dead) return;
+  x.dead = 1;
+  var i = voices.indexOf(x);
+  if (i >= 0) voices.splice(i, 1);
+  try { x.o.disconnect(); } catch (e) {}
+  try { x.q.disconnect(); } catch (e) {}
+}
+function setAt(a, v, t) {
+  a.value = v;
+  if (a.setValueAtTime) a.setValueAtTime(v, t);
+}
+function rampTo(a, v, t) {
+  a.value = v;
+  if (a.exponentialRampToValueAtTime) a.exponentialRampToValueAtTime(v, t);
+  else if (a.linearRampToValueAtTime) a.linearRampToValueAtTime(v, t);
+}
+function voice(p, n, d) {
+  while (voices.length >= 8) {
+    var old = voices.shift();
+    try { old.o.stop(); } catch (e) {}
+    forget(old);
+  }
+  var o, q, x;
+  try {
+    o = ac.createOscillator();
+    q = ac.createGain();
+    x = {o: o, q: q};
+    var t = (isFinite(ac.currentTime) ? ac.currentTime : 0) + d[2];
+    var f = 220 * Math.pow(2, (p + d[0]) / 12);
+    var z = f * Math.pow(2, d[1] / 12);
+    o.type = waves[d[4]];
+    setAt(o.frequency, f, t);
+    if (d[1]) rampTo(o.frequency, z, t + d[3]);
+    var a = Math.min(.006, d[3] * .2), level = Math.max(.0001, n * d[5]);
+    setAt(q.gain, .0001, t);
+    rampTo(q.gain, level, t + a);
+    rampTo(q.gain, .0001, t + d[3]);
+    o.connect(q);
+    q.connect(ac.destination);
+    o.onended = function () { forget(x); };
+    voices.push(x);
+    o.start(t);
+    o.stop(t + d[3] + .025);
+  } catch (e) {
+    forget(x);
+    try { if (o) o.disconnect(); } catch (x) {}
+    try { if (q) q.disconnect(); } catch (x) {}
+  }
+}
 function sound(i, p, g) {
-  if (g != null && g <= 0) return 0;
+  if (g == null) g = .12;
+  else {
+    g = +g;
+    if (!(g > 0)) return 0;
+  }
   var A = window.AudioContext || window.webkitAudioContext;
   if (!A) return 0;
   try {
     ac || (ac = new A);
-    var o = ac.createOscillator();
-    var q = ac.createGain();
-    var t = ac.currentTime;
-    var n = Math.max(.0001, Math.min(1, g == null ? .12 : g));
-    o.type = i % 2 ? 'square' : 'sine';
-    o.frequency.value = 220 * Math.pow(2, (p || 0) / 12);
-    q.gain.setValueAtTime(.0001, t);
-    q.gain.exponentialRampToValueAtTime(n, t + .005);
-    q.gain.exponentialRampToValueAtTime(.0001, t + .12);
-    o.connect(q);
-    q.connect(ac.destination);
-    o.start(t);
-    o.stop(t + .13);
+    p = +p;
+    if (!isFinite(p)) p = 0;
+    p = Math.max(-48, Math.min(48, p));
+    var id = (i | 0) % presets.length;
+    if (id < 0) id += presets.length;
+    var n = Math.min(1, g);
+    for (var j = 0, set = presets[id]; j < set.length; j++) voice(p, n, set[j]);
   } catch (e) {}
   return 0;
 }`;

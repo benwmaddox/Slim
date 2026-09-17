@@ -1,8 +1,9 @@
 # WASM size review
 
-The production build already compares plain WASM with `wasm-opt -Oz` and selects
-by complete ZIP size. This review uses Binaryen 132 and fresh compiler output.
-The experiments leave production sources, compiler behavior, and `dist` unchanged.
+These are historical measurements from before production arrays and direct branch
+conditions. The current build compares plain WASM with `wasm-opt -Oz`, `-Os`, and
+`-O4`, and converged Oz, selecting by complete ZIP size. This review used Binaryen 132. Rebuild with
+the current compiler for current numbers; the temporary patch tools are retired.
 
 ## Measurements
 
@@ -11,9 +12,9 @@ The optimizer matrix also tests embedded packaging; external wins in these games
 
 | Blockbound variant | Raw WASM | Complete ZIP |
 | --- | ---: | ---: |
-| Current compiler, plain | 15,329 B | 5,852 B |
-| Current compiler, `-Oz` | 13,539 B | 5,770 B |
-| Current compiler, `-Os` | 13,595 B | 5,766 B |
+| Earlier compiler, plain | 15,329 B | 5,852 B |
+| Earlier compiler, `-Oz` | 13,539 B | 5,770 B |
+| Earlier compiler, `-Os` | 13,595 B | 5,766 B |
 | Direct branch conditions, `-Oz` | 10,228 B | 5,633 B |
 | Memory arrays / loops, `-Oz` | 11,639 B | 5,637 B |
 | Arrays / loops + direct conditions, `-Oz` | 8,973 B | 5,521 B |
@@ -25,9 +26,9 @@ well. The arrays occupy 120 bytes within the existing 65,536-byte memory page.
 
 | Rainbow variant | Raw WASM | Complete ZIP |
 | --- | ---: | ---: |
-| Current compiler, plain | 4,251 B | 3,681 B |
-| Current compiler, `-Oz` | 3,939 B | 3,608 B |
-| Current compiler, `-O4` | 3,997 B | 3,600 B |
+| Earlier compiler, plain | 4,251 B | 3,681 B |
+| Earlier compiler, `-Oz` | 3,939 B | 3,608 B |
+| Earlier compiler, `-O4` | 3,997 B | 3,600 B |
 | Direct branch conditions, `-Oz` | 3,462 B | 3,585 B |
 
 `-O4` wins over `-Oz` for Rainbow's ZIP despite producing larger raw WASM. For
@@ -37,8 +38,8 @@ no useful additional savings here. Adding flatten/rereloop and other passes afte
 
 ## Clean compiler opportunity
 
-Current branch emission first converts comparison results from i32 to f32, then
-compares that numeric boolean against zero. Optimized Blockbound WAT still contains
+Earlier branch emission converted comparison results from i32 to f32, then
+compared that numeric boolean against zero. That optimized Blockbound WAT contained
 374 such conversions; Rainbow has 61. The prototype emits direct i32 conditions
 for comparisons, logical negation, and short-circuit `&&` / `||`. Arbitrary numeric
 conditions retain the existing `value != 0` rule. Value expressions still produce
@@ -71,33 +72,32 @@ It is not a general rewrite of arbitrary floating-point index arithmetic.
   during this review. Arrays still require a memory page.
 - Compact mesh data or palette indices could replace repeated triangle-building
   code, but introduce decode/render code. Their net saving requires measurement.
-- These prototypes use known-safe array loop indices. General array index checks
-  are not implemented, so measured sizes are not promises for a checked language.
+- These prototypes used known-safe array loop indices without checks. Their
+  measured sizes are not promises for the current checked language.
   Runtime speed and total engine memory consumption are not benchmarked.
 
 ## Reproduction and validation
 
 ```text
-node tools/compare-enemy-arrays.mjs
 node tools/compare-wasm-opt.mjs
-node tools/compare-wasm-conditions.mjs
+npm run build
+npm run build:blockbound
+npm run build:shardbound
 ```
 
-The first command refreshes the optional memory-loop optimizer seed. The optimizer
-matrix compiles fresh production sources, runs nine bounded profiles per game,
+The optimizer matrix compiles fresh production sources, runs nine bounded profiles per game,
 checks imports/exports/pages and callback parity, and compares embedded/external
-minified packages. Its optional loop seed is identified as already optimized and
-checked against fresh production game callbacks.
+minified packages. It no longer reads old patched array-study seeds.
 
-The condition study patches temporary compiler copies and compiles every profile
-fresh. Plain and optimized variants match 600 mixed pointer/keyboard Rainbow ticks
+The historical condition study patched temporary compiler copies. Plain and
+optimized variants matched 600 mixed pointer/keyboard Rainbow ticks
 and the complete 1,706-tick Blockbound winning/loss/restart trace. Synthetic cases
-cover nested logic, import effects, NaN truth, and signed zero. Repeated runs produce
-stable ZIP hashes. The existing 47 tests pass. Syntax and diff checks pass.
+covered nested logic, import effects, NaN truth, and signed zero. Repeated runs
+produced stable ZIP hashes; the then-existing 47 tests passed.
 
-Reports and raw tool-generated WAT are under `output/wasm-opt-study` and
-`output/wasm-condition-study`. No WAT readability pass or runtime dependency is added.
+Current reports and raw tool-generated WAT are under `output/wasm-opt-study`.
+No WAT readability pass or runtime dependency is added.
 
-Recommendation: first retain direct condition emission, then implement fixed arrays
-with runtime loops and separate base offsets. Continue selecting optimizers by
+Production work incorporates direct condition emission and fixed arrays with
+runtime loops and separate base offsets. Continue selecting optimizers by
 complete ZIP size. Keep larger ABI/rendering experiments separate.

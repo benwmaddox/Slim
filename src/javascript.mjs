@@ -55,11 +55,16 @@ function collectLayout(fn, useF32) {
       collectModulo(expression.expression);
     } else if (expression.kind === "call") {
       for (const argument of expression.args) collectModulo(argument);
+    } else if (expression.kind === "index") {
+      if (expression.constantIndex === undefined) collectModulo(expression.index);
     }
   };
   const collectExpressions = (statements) => {
     for (const statement of statements) {
       if (statement.kind === "let" || statement.kind === "assign" || statement.kind === "expr") {
+        collectModulo(statement.expression);
+      } else if (statement.kind === "arrayAssign") {
+        collectModulo(statement.index);
         collectModulo(statement.expression);
       } else if (statement.kind === "return") {
         if (statement.expression) collectModulo(statement.expression);
@@ -93,6 +98,18 @@ function numberLiteral(value) {
   return String(value);
 }
 
+function f32Literal(value) {
+  if (!Number.isFinite(value) || Object.is(value, -0)) return numberLiteral(value);
+  let shortest = numberLiteral(value);
+  for (let precision = 1; precision <= 9; precision += 1) {
+    const candidate = Number(value.toPrecision(precision)).toString();
+    if (candidate.length < shortest.length && Object.is(Math.fround(Number(candidate)), value)) {
+      shortest = candidate;
+    }
+  }
+  return shortest;
+}
+
 function emitJavaScript(program, detailed, precision) {
   const useF32 = precision === "f32";
   const functionsByName = program.functions;
@@ -105,6 +122,72 @@ function emitJavaScript(program, detailed, precision) {
   });
   const functionNames = new Map(reachableNames.map((name, index) => [name, `fn_${safeName(name)}_${index}`]));
   const layouts = new Map(reachableFunctions.map((fn) => [fn.name, collectLayout(fn, useF32)]));
+
+  const referencedArrays = new Set();
+  const dynamicArrayNames = new Set();
+  const visitArrayReferences = (expression) => {
+    if (expression.kind === "index") {
+      const arrayName = expression.arrayName ?? expression.name;
+      referencedArrays.add(arrayName);
+      if (expression.dynamic || expression.constantIndex === undefined) dynamicArrayNames.add(arrayName);
+      visitArrayReferences(expression.index);
+    } else if (expression.kind === "unary") {
+      visitArrayReferences(expression.expression);
+    } else if (expression.kind === "binary") {
+      visitArrayReferences(expression.left);
+      visitArrayReferences(expression.right);
+    } else if (expression.kind === "call") {
+      for (const argument of expression.args) visitArrayReferences(argument);
+    }
+  };
+  const visitArrayStatements = (statements) => {
+    for (const statement of statements) {
+      switch (statement.kind) {
+        case "let":
+        case "assign":
+        case "expr":
+          visitArrayReferences(statement.expression);
+          break;
+        case "arrayAssign": {
+          const arrayName = statement.arrayName ?? statement.name;
+          referencedArrays.add(arrayName);
+          if (statement.dynamic || statement.constantIndex === undefined) dynamicArrayNames.add(arrayName);
+          visitArrayReferences(statement.index);
+          visitArrayReferences(statement.expression);
+          break;
+        }
+        case "return":
+          if (statement.expression) visitArrayReferences(statement.expression);
+          break;
+        case "if":
+          visitArrayReferences(statement.condition);
+          visitArrayStatements(statement.thenBlock.body);
+          if (statement.elseBlock) visitArrayStatements(statement.elseBlock.body);
+          break;
+        case "while":
+          visitArrayReferences(statement.condition);
+          visitArrayStatements(statement.body.body);
+          break;
+        case "block":
+          visitArrayStatements(statement.body);
+          break;
+        default:
+          break;
+      }
+    }
+  };
+  for (const fn of reachableFunctions) visitArrayStatements(fn.body);
+
+  const detailedArrayLayout = new Map((detailed.arrayLayout ?? []).map((array) => [array.name, array]));
+  const materializedArrays = program.arrays.filter((array) => {
+    const layout = detailedArrayLayout.get(array.name);
+    return array.mutable || referencedArrays.has(array.name) || layout?.materialized;
+  });
+  const arraysByName = new Map(materializedArrays.map((array, index) => [
+    array.name,
+    `a_${safeName(array.name)}_${index}`,
+  ]));
+  const dynamicArrayReferences = dynamicArrayNames.size > 0;
 
   const round = (expression) => useF32 ? `r(${expression})` : expression;
   const truth = (expression) => `t(${expression})`;
@@ -121,6 +204,19 @@ function emitJavaScript(program, detailed, precision) {
           if (global) return global;
           backendError(`unknown value ${JSON.stringify(node.name)}`, node);
           return "0";
+        }
+        case "index": {
+          const arrayName = node.arrayName ?? node.name;
+          const array = program.arrays.find((candidate) => candidate.name === arrayName);
+          const target = arraysByName.get(arrayName);
+          if (!array || !target) {
+            backendError(`unknown array ${JSON.stringify(arrayName)}`, node);
+          }
+          const index = node.constantIndex !== undefined
+            ? String(node.constantIndex)
+            : `checkedArrayIndex(${emit(node.index)}, ${array.length}, ${JSON.stringify(arrayName)})`;
+          // Float32Array loads are already exact f32 values in both profiles.
+          return `${target}[${index}]`;
         }
         case "call": {
           const args = node.args.map((argument) => emit(argument)).join(", ");
@@ -205,6 +301,21 @@ function emitJavaScript(program, detailed, precision) {
           line(`${target} = ${emitExpression(statement.expression, context)};`);
           break;
         }
+        case "arrayAssign": {
+          const arrayName = statement.arrayName ?? statement.name;
+          const array = program.arrays.find((candidate) => candidate.name === arrayName);
+          const target = arraysByName.get(arrayName);
+          if (!array || !target) {
+            backendError(`unknown array ${JSON.stringify(arrayName)}`, statement);
+          }
+          const index = statement.constantIndex !== undefined
+            ? String(statement.constantIndex)
+            : `checkedArrayIndex(${emitExpression(statement.index, context)}, ${array.length}, ${JSON.stringify(arrayName)})`;
+          // The computed property is evaluated before the RHS, so an invalid
+          // dynamic index throws without running any value-side effects.
+          line(`${target}[${index}] = ${emitExpression(statement.expression, context)};`);
+          break;
+        }
         case "expr":
           line(`${emitExpression(statement.expression, context)};`);
           break;
@@ -243,12 +354,33 @@ function emitJavaScript(program, detailed, precision) {
 
   const lines = ["(e = {}) => {", `  // precision: ${precision}`, "  const t = (v) => v !== 0;"];
   if (useF32) lines.push("  const r = Math.fround;");
+  if (dynamicArrayReferences) {
+    lines.push(
+      "  const checkedArrayIndex = (index, length, name) => {",
+      "    if (!Number.isFinite(index) || !Number.isInteger(index) || index < 0 || index >= length) {",
+      "      throw new RangeError(`array ${name} index is out of bounds for length ${length}`);",
+      "    }",
+      "    return index;",
+      "  };",
+    );
+  }
 
   const globalContext = {
     layout: { locals: new Map(), moduloTemps: new Map() },
   };
   for (const global of program.globals) {
     lines.push(`  let ${globalsByName.get(global.name)} = ${emitExpression(global.expression, globalContext)};`);
+  }
+  for (const array of materializedArrays) {
+    const target = arraysByName.get(array.name);
+    const values = array.values ?? [];
+    const isRepeat = array.repeatCount !== null && array.repeatCount !== undefined
+      || Boolean(array.initializer?.repeat);
+    if (isRepeat) {
+      lines.push(`  const ${target} = new Float32Array(${array.length}).fill(${f32Literal(values[0] ?? 0)});`);
+    } else {
+      lines.push(`  const ${target} = new Float32Array([${values.map(f32Literal).join(", ")}]);`);
+    }
   }
 
   for (const fn of reachableFunctions) {

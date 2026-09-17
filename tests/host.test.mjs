@@ -16,6 +16,7 @@ async function bootPage(page, {audio = false, javascript = false} = {}) {
   const globalHandlers = new Map();
   const canvasHandlers = new Map();
   const audioStats = {contexts: 0, oscillators: 0};
+  const audioNodes = [];
   let capturedImports;
   let frameCallback;
   const captureHost = (host) => { capturedImports = host; };
@@ -40,18 +41,32 @@ async function bootPage(page, {audio = false, javascript = false} = {}) {
     }
     createOscillator() {
       audioStats.oscillators += 1;
-      return {
-        frequency: {},
-        connect() {},
-        start() {},
-        stop() {}
+      const node = {
+        kind: 'oscillator', type: '', frequency: {value: 0, sets: [], ramps: []},
+        connections: [], starts: [], stops: [], connected: false, disconnected: false, onended: null,
+        connect(target) { this.connections.push(target); this.connected = true; },
+        disconnect() { this.connected = false; this.disconnected = true; },
+        start(time) { this.starts.push(time); },
+        stop(time) { this.stops.push(time); }
       };
+      node.frequency.setValueAtTime = (value, time) => node.frequency.sets.push([value, time]);
+      node.frequency.exponentialRampToValueAtTime = (value, time) => node.frequency.ramps.push([value, time]);
+      node.frequency.linearRampToValueAtTime = (value, time) => node.frequency.ramps.push([value, time]);
+      audioNodes.push(node);
+      return node;
     }
     createGain() {
-      return {
-        gain: {setValueAtTime() {}, exponentialRampToValueAtTime() {}},
-        connect() {}
+      const node = {
+        kind: 'gain', gain: {value: 0, sets: [], ramps: []},
+        connections: [], connected: false, disconnected: false,
+        connect(target) { this.connections.push(target); this.connected = true; },
+        disconnect() { this.connected = false; this.disconnected = true; }
       };
+      node.gain.setValueAtTime = (value, time) => node.gain.sets.push([value, time]);
+      node.gain.exponentialRampToValueAtTime = (value, time) => node.gain.ramps.push([value, time]);
+      node.gain.linearRampToValueAtTime = (value, time) => node.gain.ramps.push([value, time]);
+      audioNodes.push(node);
+      return node;
     }
     resume() {}
   }
@@ -94,6 +109,10 @@ async function bootPage(page, {audio = false, javascript = false} = {}) {
     page,
     imports: capturedImports,
     audioStats,
+    audioNodes,
+    finishAudio: () => {
+      for (const node of audioNodes) if (typeof node.onended === 'function') node.onended();
+    },
     tick: () => frameCallback(1000 / 60),
     globalEventTypes: () => [...globalHandlers.keys()],
     canvasEventTypes: () => [...canvasHandlers.keys()],
@@ -166,6 +185,81 @@ test('zero-gain sound does not construct audio or oscillator nodes', async () =>
     host.imports.e.sound(0, 0, 0.5);
     assert.deepEqual(host.audioStats, {contexts: 1, oscillators: 1});
   }
+});
+
+test('sound presets schedule finite, distinct musical gestures', async () => {
+  const host = await boot(soundSource, {audio: true});
+  for (let event = 0; event <= 4; event += 1) host.imports.e.sound(event, 0, 0.5);
+
+  const oscillators = host.audioNodes.filter((node) => node.kind === 'oscillator');
+  assert.equal(oscillators.length, 10, 'the five presets should expand to their planned voices');
+  assert.equal(oscillators[0].type, 'triangle');
+  assert.ok(oscillators[0].frequency.ramps[0][0] > oscillators[0].frequency.sets[0][0], 'jump should rise in pitch');
+
+  const pickup = oscillators.slice(1, 3);
+  assert.equal(new Set(pickup.map((node) => node.type)).size, 2, 'pickup should layer bright waveforms');
+  assert.ok(new Set(pickup.map((node) => node.starts[0])).size > 1, 'pickup voices should have a small offset');
+
+  const loss = oscillators[3];
+  assert.equal(loss.type, 'sawtooth');
+  assert.ok(loss.frequency.ramps[0][0] < loss.frequency.sets[0][0], 'loss should descend in pitch');
+
+  const win = oscillators.slice(4, 8);
+  assert.equal(win.length, 4, 'win should be a short arpeggio');
+  assert.ok(new Set(win.map((node) => node.frequency.sets[0][0])).size >= 3, 'win should contain a chord');
+  assert.ok(new Set(win.map((node) => node.starts[0])).size >= 3, 'win notes should be staggered');
+
+  for (const node of oscillators) {
+    for (const [value, time] of [...node.frequency.sets, ...node.frequency.ramps]) {
+      assert.ok(Number.isFinite(value), `${node.kind} schedule value should be finite`);
+      assert.ok(Number.isFinite(time), `${node.kind} schedule time should be finite`);
+    }
+    assert.ok(node.frequency.sets[0][0] > 0, 'oscillator frequency should stay positive');
+    assert.ok(node.stops[0] > node.starts[0], 'oscillator should have a finite release');
+  }
+  for (const node of host.audioNodes.filter((node) => node.kind === 'gain')) {
+    for (const [value, time] of [...node.gain.sets, ...node.gain.ramps]) {
+      assert.ok(Number.isFinite(value), 'gain schedule value should be finite');
+      assert.ok(Number.isFinite(time), 'gain schedule time should be finite');
+    }
+  }
+});
+
+test('sound voice count stays bounded and ended nodes disconnect', async () => {
+  const host = await boot(soundSource, {audio: true});
+  for (let index = 0; index < 12; index += 1) host.imports.e.sound(3, index, 0.5);
+
+  const connected = () => host.audioNodes.filter((node) => node.connected);
+  assert.ok(connected().filter((node) => node.kind === 'oscillator').length <= 8, 'active oscillator voices should be capped');
+  assert.ok(host.audioNodes.some((node) => node.disconnected), 'old voices should be disconnected when the cap is reached');
+  host.finishAudio();
+  assert.equal(connected().length, 0, 'ended oscillator and gain nodes should be disconnected');
+});
+
+test('sound clamps pitch and gain before scheduling WebAudio parameters', async () => {
+  const host = await boot(soundSource, {audio: true});
+  host.imports.e.sound(0, 100000, 10);
+  host.imports.e.sound(2, -100000, 0.5);
+  host.imports.e.sound(1, Number.NaN, Number.NaN);
+
+  const oscillators = host.audioNodes.filter((node) => node.kind === 'oscillator');
+  assert.equal(oscillators.length, 2, 'invalid gain should remain silent');
+  for (const node of oscillators) {
+    assert.ok(node.frequency.sets[0][0] > 0);
+    assert.ok(node.frequency.sets[0][0] < 10000);
+  }
+  for (const node of host.audioNodes.filter((node) => node.kind === 'gain')) {
+    assert.ok(node.gain.ramps.every(([value]) => value > 0 && value <= 1));
+  }
+});
+
+test('pointer gesture unlocks one shared audio context', async () => {
+  const host = await boot(soundSource, {audio: true});
+  assert.equal(host.audioStats.contexts, 0);
+  host.dispatchCanvas('pointerdown', pointer());
+  host.dispatchGlobal('keydown', keyboard('ArrowLeft'));
+  host.imports.e.sound(3, 0, 0.5);
+  assert.equal(host.audioStats.contexts, 1);
 });
 
 test('keyboard-only WASM and JavaScript hosts expose keyboard input without pointer state', async () => {

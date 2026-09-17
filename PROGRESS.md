@@ -1,5 +1,10 @@
 # Slim comparison checkpoint
 
+The measurements below preserve earlier milestones. See
+[CONTENT_PLAN.md](CONTENT_PLAN.md) for the current arrays, reusable content,
+sound, and Shardbound implementation checkpoint. Fresh builds select among
+plain, Oz, Os, O4, and converged Oz by complete ZIP size.
+
 Built independently of Stasis with Luna Max agents and a focused Sol medium review.
 The same Slim source produces WASM, native JS, and exact-f32 JS through one browser
 host. Rendering uses solid RGB triangles; gameplay includes collection, hazards,

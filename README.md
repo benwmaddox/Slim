@@ -20,7 +20,8 @@ npm run build
 
 Outputs follow the source basename: `rainbow.wasm`, `rainbow.wat`,
 `rainbow.html`, and `rainbow.zip`. The build compares embedded and separate WASM,
-plain and optional Binaryen -Oz, and original versus Terser-minified scripts.
+plain and optional Binaryen `-Oz`, `-Os`, `-O4`, and `-Oz --converge`, and original versus
+Terser-minified scripts.
 It selects by complete ZIP size, including archive overhead.
 
 `rainbow.js.html` / `rainbow.js.zip` contain the native JavaScript version;
@@ -46,7 +47,7 @@ be opened directly after extraction.
 
 Optional: put Binaryen's `wasm-opt` on PATH, or set `SLIM_WASM_OPT` to its
 executable. Set `SLIM_WASM_DIS` if the disassembler is not on PATH. The build
-compares plain and `-Oz` output across both packaging
+compares plain, `-Oz`, `-Os`, `-O4`, and `-Oz --converge` output across both packaging
 layouts and selects the smallest complete ZIP. Set `SLIM_PYTHON` if Python uses
 a different command name. An explicitly configured optimizer failure aborts
 the build.
@@ -65,6 +66,23 @@ remain available. Open `dist/blockbound.js.html` or serve `blockbound.html`.
 
 `node tools/browser-check.mjs --source=blockbound` checks the generated JS and
 WASM with a repeatable keyboard route, jumping, loss/restart, and GPU output.
+
+## Array example: Shardbound
+
+```sh
+npm run build:shardbound
+node tools/browser-check.mjs --source=shardbound
+```
+
+Shardbound is a three-level keyboard platformer. Collect the required shards
+and reach its exit; Space continues between levels. Arrows/A-D move, Space
+jumps, and R resets the entire run. Terrain arrays drive drawing and collision.
+Enemy pools share update loops, and characters use an atlas of reusable triangle
+parts with translation, scale, flip, and pose transforms. This exercises content
+reuse rather than adding a general game engine.
+
+Normal builds keep eight files under the `shardbound` basename. Serve
+`dist/shardbound.html` or open `dist/shardbound.js.html` for the native JS version.
 
 ## Initial language
 
@@ -88,8 +106,8 @@ function calls, arithmetic, comparisons, and short-circuit logical expressions.
 Comparisons and logical expressions produce numeric 0 or 1. Arithmetic and
 constant initializers round at each f32 operation. `%` is implemented as
 `x - trunc(x / y) * y`, with f32 rounding; it is intended for small game values
-and can lose precision for large quotients. No arrays,
-strings, allocation, classes, or modules yet. WASM is emitted directly; no C,
+and can lose precision for large quotients. Fixed numeric arrays are described
+below. There are no strings, allocation, classes, or modules. WASM is emitted directly; no C,
 Rust, LLVM, or language runtime is required to build a game.
 
 ## Compile-time constants
@@ -119,6 +137,8 @@ memory layout, use `compileDetailed(source, {globalStorage: 'memory'})`.
 `globalLayout` reports each name and its byte offset; slots are little-endian f32
 values, four bytes each, starting at zero in the exported memory. Initial values
 are present when the module is instantiated, before `init()` runs.
+`arrayLayout` reports array lengths, materialization, and offsets. Materialized
+arrays follow scalar memory slots; scalar globals use no linear-memory slots.
 
 `node tools/compare-state.mjs examples/rainbow.slim` compares both storage modes
 with identical minified hosts and archive names, including plain and Binaryen Oz
@@ -143,28 +163,55 @@ from 220 Hz, gain is 0..1, and zero gain is silent. `input(index)` returns:
 | 8 | Pointer currently held |
 | 9 | R restart pressed |
 
+Sound IDs 0..4 select jump, pickup/stomp, loss, win arpeggio, and level transition.
+The host supplies envelopes and pitch changes, caps simultaneous oscillator
+voices at eight, and disconnects ended nodes. All effects use the same import;
+there are no audio assets to package.
+
 These imports return numbers. The compiler only includes functions/imports
 reachable from the entry points. The host specializes to the imports present in
 the module. All interop is deliberately small; shared-memory batching remains a
 future comparison against this baseline.
 
-## Array planning experiment
+## Fixed numeric arrays
 
-`node tools/compare-enemy-arrays.mjs` compares Blockbound's existing enemy code,
-a shared function with scalar globals, and fixed memory arrays with runtime
-loops. It writes selected packages and replay results under
-`output/array-study/runtime-comparison`; normal builds and `dist` are unaffected.
-The temporary compiler supports only the experiment's direct array loads and
-stores. Production array syntax is not implemented. See [ARRAY_PLAN.md](ARRAY_PLAN.md)
-for the proposed language slice and measurements. The comparison requires
-`wasm-opt`, `wasm-dis`, Python, and the existing development dependencies.
+Top-level arrays support literal lists, repeated initial values, indexing, and
+the existing `while` loops:
+
+```text
+const ENEMY_COUNT = 3;
+const enemy_x = [180, 420, 700];
+global enemy_alive = [1; ENEMY_COUNT];
+
+fn reset_enemies() {
+  let i = 0;
+  while (i < ENEMY_COUNT) {
+    enemy_alive[i] = 1;
+    i = i + 1;
+  }
+}
+```
+
+Elements are f32 in both backends, including native JS. Mutable arrays persist
+between frames; `init` and restart code must reset them explicitly. Constant
+arrays reject writes. Constant-index reads can inline values; runtime-indexed
+arrays use WASM memory or JavaScript typed arrays. Scalar state still defaults
+to WASM globals.
+
+Indices evaluate once and must be finite integers in `[0,length)`. Invalid
+constant indices fail compilation; invalid dynamic indices trap in WASM or
+throw `RangeError` in JS. A write checks its index before evaluating its value.
+Lengths must be compile-time nonnegative integers; total array elements are
+limited to 65,536. Arrays cannot resize, nest, alias, or be passed/returned as
+values. Locals and parameters can shadow array names as scalar values.
+
+See [CONTENT_PLAN.md](CONTENT_PLAN.md) for the implementation contract and
+[ARRAY_PLAN.md](ARRAY_PLAN.md) for the earlier unchecked experiment. Its sizes
+are historical, rather than promises for checked indexing.
 
 `node tools/compare-wasm-opt.mjs` compares optimizer settings by complete ZIP
-size. `node tools/compare-wasm-conditions.mjs` measures direct branch conditions,
-including their combination with memory-array loops. Both validate gameplay
-callbacks and write reports under `output`. See [WASM_SIZE.md](WASM_SIZE.md) for
-the measured savings and remaining opportunities. Production compiler behavior
-and normal builds are unchanged by these studies.
+size and validates gameplay callbacks. Reports go under `output`. See
+[WASM_SIZE.md](WASM_SIZE.md) for earlier measurements and remaining opportunities.
 
 ## Limits
 

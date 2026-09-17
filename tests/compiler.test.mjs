@@ -88,6 +88,30 @@ test('short-circuits logical expressions before calling imports', () => {
   assert.deepEqual(calls, []);
 });
 
+test('lowers condition comparisons to i32 truth while preserving NaN and zero semantics', () => {
+  const source = `
+    fn init() {}
+    fn frame() {
+      if (input(0)) { return 1; }
+      if (input(1) == input(2)) { return 2; }
+      if (input(3) || input(4)) { return 3; }
+      if (!input(5)) { return 4; }
+      return 5;
+    }
+  `;
+  const run = (values) => {
+    const instance = new WebAssembly.Instance(new WebAssembly.Module(compile(source)), {
+      e: {input: (index) => values[index] ?? 0},
+    });
+    return instance.exports.frame();
+  };
+  assert.equal(run({0: Number.NaN}), 1);
+  assert.equal(run({0: -0, 1: Number.NaN, 2: Number.NaN, 3: 0, 4: -0, 5: -0}), 4);
+  assert.equal(run({0: 0, 1: 2, 2: 2}), 2);
+  assert.equal(run({0: 0, 1: 2, 2: 3, 3: 0, 4: 7}), 3);
+  assert.equal(run({0: 0, 1: 2, 2: 3, 3: 0, 4: 0, 5: 1}), 5);
+});
+
 test('imports tri, sound, and input with the compact f32 signatures', () => {
   const calls = [];
   const {module, instance} = instantiate(

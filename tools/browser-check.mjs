@@ -242,7 +242,7 @@ async function platformerStats(page, colors) {
 }
 
 async function checkPlatformer(page, screenshot) {
-  const {winningReplay, heroColor, winColor, lossColor} = await import('./blockbound-replay.mjs');
+  const {winningReplay, heroColor, winColor, lossColor} = await import(stem === 'shardbound' ? './shardbound-replay.mjs' : './blockbound-replay.mjs');
   const colors = [heroColor, winColor, lossColor];
   const step = ticks => page.evaluate(ticks => window.__slimClock.step(ticks), ticks);
   const stats = () => platformerStats(page, colors);
@@ -288,6 +288,9 @@ async function checkPlatformer(page, screenshot) {
     maximumTriangles = Math.max(maximumTriangles, frame.triangles);
     if (index === Math.floor(winningReplay.length / 2)) {
       await page.screenshot({path: screenshot.replace(/\.png$/, '-course.png'), fullPage: true});
+    }
+    if (segment.screenshot && /^level-[1-3]$/.test(segment.screenshot)) {
+      await page.screenshot({path: screenshot.replace(/\.png$/, `-${segment.screenshot}.png`), fullPage: true});
     }
   }
   for (const key of keys) await page.keyboard.up(key);
@@ -368,9 +371,9 @@ async function runBrowser(name, playwright, url, screenshot) {
 
   try {
     await page.addInitScript({content: probeScript});
-    if (stem === 'blockbound') await page.addInitScript({content: clockScript});
+    if (stem === 'blockbound' || stem === 'shardbound') await page.addInitScript({content: clockScript});
     await page.goto(url, {waitUntil: 'load', timeout: timeoutMs});
-    if (stem === 'blockbound') {
+    if (stem === 'blockbound' || stem === 'shardbound') {
       const checks = await checkPlatformer(page, screenshot);
       if (errors.length || failedRequests.length) fail([...errors, ...failedRequests].join('; '));
       return {name, status: 'passed', version: browser.version(), executablePath, url,

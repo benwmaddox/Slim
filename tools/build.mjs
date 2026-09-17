@@ -207,15 +207,21 @@ async function buildInStaging(options, sourceText, staging) {
 
   const optimizer = configuredExecutable('wasm-opt', process.env.SLIM_WASM_OPT);
   if (optimizer) {
-    const optimizedPath = join(staging, `${stem}.Oz.wasm`);
-    const result = spawnSync(optimizer, [plainPath, '-Oz', '--strip-debug', '--strip-producers', '-o', optimizedPath], {encoding: 'utf8', windowsHide: true});
-    if (result.error || result.status !== 0) {
-      const detail = result.error?.message || result.stderr?.trim() || result.stdout?.trim() || `exit ${result.status}`;
-      throw new Error(`${process.env.SLIM_WASM_OPT ? 'Configured ' : ''}wasm-opt failed: ${detail}`);
-    } else {
+    for (const {name, flags} of [
+      {name: 'Oz', flags: ['-Oz']},
+      {name: 'Os', flags: ['-Os']},
+      {name: 'O4', flags: ['-O4']},
+      {name: 'Oz-converge', flags: ['-Oz', '--converge']},
+    ]) {
+      const optimizedPath = join(staging, `${stem}.${name}.wasm`);
+      const result = spawnSync(optimizer, [plainPath, ...flags, '--strip-debug', '--strip-producers', '-o', optimizedPath], {encoding: 'utf8', windowsHide: true});
+      if (result.error || result.status !== 0) {
+        const detail = result.error?.message || result.stderr?.trim() || result.stdout?.trim() || `exit ${result.status}`;
+        throw new Error(`${process.env.SLIM_WASM_OPT ? 'Configured ' : ''}wasm-opt ${name} failed: ${detail}`);
+      }
       const bytes = await readFile(optimizedPath);
       if (!WebAssembly.validate(bytes)) throw new Error('wasm-opt emitted invalid WASM');
-      wasmModules.push({name: 'Oz', bytes});
+      wasmModules.push({name, bytes});
     }
   } else if (process.env.SLIM_WASM_OPT) {
     throw new Error(`Configured wasm-opt was not found: ${process.env.SLIM_WASM_OPT}`);
@@ -345,6 +351,13 @@ async function buildInStaging(options, sourceText, staging) {
     stem,
     title,
     keyboardOnly: options.keyboardOnly,
+    compiler: {
+      globalStorage: detailed.globalStorage,
+      globals: detailed.globals,
+      memoryPages: detailed.memoryPages,
+      allocatedBytes: detailed.allocatedBytes,
+      arrayLayout: (detailed.arrayLayout ?? []).map(({values, ...layout}) => layout),
+    },
     budget,
     selected: bestWasm.id,
     selectedWasm: candidateSummary({...bestWasm, reportArchive: `${stem}.zip`}),

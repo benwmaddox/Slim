@@ -1,5 +1,10 @@
 # Fixed arrays for Slim
 
+This document preserves the earlier unchecked prototype measurements. Production
+fixed arrays are implemented under [CONTENT_PLAN.md](CONTENT_PLAN.md),
+with checked indices and the Shardbound example. The temporary compiler-patching
+tools are retired; use normal builds for current measurements.
+
 Blockbound repeats ten enemy collision blocks, draw branches, alive flags, and
 reset assignments. Terrain data repeats between collision and drawing. Rainbow
 has similar repeated hazards and collectible flags. Fixed arrays are a useful
@@ -7,7 +12,7 @@ next language feature, but their representation should follow actual game sizes.
 
 ## Same-game comparison
 
-Run `node tools/compare-enemy-arrays.mjs`. This isolated experiment patches
+The original `compare-enemy-arrays.mjs` experiment patched
 temporary copies of the compiler and JS backend; production language syntax,
 game sources, and `dist` remain unchanged. Selected artifacts and a full report
 are written to `output/array-study/runtime-comparison`.
@@ -102,8 +107,9 @@ body alone cleans source but duplicates output; shared functions avoid that.
 5. Rebuild and compare complete ZIPs against this experiment; run `npm test`,
    syntax checks, and `git diff --check`. Keep normal builds at eight artifacts.
 
-General array syntax is still planned. The committed comparison tool is the
-reviewable proof for choosing its first storage backend.
+The production implementation keeps Blockbound as a scalar regression reference
+and exercises arrays through Shardbound's terrain, meshes, enemies, and shards.
+Its dynamic index checks are additional behavior absent from this experiment.
 
 The subsequent [WASM size review](WASM_SIZE.md) combines array loops with direct
 branch conditions and separate array base offsets: Blockbound's complete WASM ZIP
