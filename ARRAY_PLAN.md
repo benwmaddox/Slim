@@ -104,3 +104,7 @@ body alone cleans source but duplicates output; shared functions avoid that.
 
 General array syntax is still planned. The committed comparison tool is the
 reviewable proof for choosing its first storage backend.
+
+The subsequent [WASM size review](WASM_SIZE.md) combines array loops with direct
+branch conditions and separate array base offsets: Blockbound's complete WASM ZIP
+falls to 5,516 bytes. This remains an isolated prototype with known-safe indices.

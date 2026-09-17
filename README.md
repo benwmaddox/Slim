@@ -159,6 +159,13 @@ stores. Production array syntax is not implemented. See [ARRAY_PLAN.md](ARRAY_PL
 for the proposed language slice and measurements. The comparison requires
 `wasm-opt`, `wasm-dis`, Python, and the existing development dependencies.
 
+`node tools/compare-wasm-opt.mjs` compares optimizer settings by complete ZIP
+size. `node tools/compare-wasm-conditions.mjs` measures direct branch conditions,
+including their combination with memory-array loops. Both validate gameplay
+callbacks and write reports under `output`. See [WASM_SIZE.md](WASM_SIZE.md) for
+the measured savings and remaining opportunities. Production compiler behavior
+and normal builds are unchanged by these studies.
+
 ## Limits
 
 This is a prototype, not a general compiler or game engine. WASM and the f32 JS

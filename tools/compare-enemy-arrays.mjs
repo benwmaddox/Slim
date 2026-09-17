@@ -78,7 +78,7 @@ ${positions.map(([x, y], index) => `  enemy${index}_alive = update_enemy(${x}, $
   return replaceBetween(source, 'fn update_enemies() {', 'fn update_player() {', helper, 'shared helper update block');
 }
 
-function makeLoopMemorySource(source) {
+export function makeLoopMemorySource(source) {
   let result = source;
   for (let index = 0; index < enemyCount; index += 1) {
     const declaration = `global enemy${index}_alive = 1;`;
@@ -137,7 +137,7 @@ function makeLoopMemorySource(source) {
   return result;
 }
 
-function patchExperimentalCompiler(source) {
+export function patchExperimentalCompiler(source) {
   source = source.replace(/\r\n/g, '\n');
   const intrinsicDecl = `const EXPERIMENTAL_INTRINSICS = Object.freeze({
   __array_load: Object.freeze({params: 2}),
@@ -744,4 +744,4 @@ async function main() {
   }
 }
 
-await main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
