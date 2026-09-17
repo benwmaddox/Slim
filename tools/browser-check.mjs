@@ -27,7 +27,7 @@ const requestedBrowsers = (option('browsers') || process.env.SLIM_BROWSERS || 'c
 const allowMissing = hasFlag('allow-missing');
 const timeoutMs = Number(option('timeout') || process.env.SLIM_BROWSER_TIMEOUT || 8000);
 const stem = basename(option('source') || 'rainbow', '.slim');
-const requestedProfiles = (option('profiles') || 'wasm,js-native,js-f32').split(',');
+const requestedProfiles = (option('profiles') || 'wasm,js-native').split(',');
 const profileSuffix = {'wasm': '', 'js-native': '.js', 'js-f32': '.f32'};
 
 function fail(message) {

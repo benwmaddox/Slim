@@ -13,13 +13,14 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const budget = 13312;
 
 function usage() {
-  console.log('Usage: node tools/build.mjs [source.slim] [--out-dir DIR] [--check]');
+  console.log('Usage: node tools/build.mjs [source.slim] [--out-dir DIR] [--check] [--compare-f32]');
 }
 
 function parseArgs(argv) {
   let source;
   let outDir;
   let check = false;
+  let compareF32 = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') {
@@ -28,6 +29,10 @@ function parseArgs(argv) {
     }
     if (argument === '--check') {
       check = true;
+      continue;
+    }
+    if (argument === '--compare-f32') {
+      compareF32 = true;
       continue;
     }
     if (argument === '--out-dir' || argument.startsWith('--out-dir=')) {
@@ -48,6 +53,7 @@ function parseArgs(argv) {
     source: resolve(root, source || 'examples/rainbow.slim'),
     output: resolve(root, outDir || 'dist'),
     check,
+    compareF32,
   };
 }
 
@@ -129,7 +135,7 @@ function candidateSummary(candidate) {
   };
 }
 
-function obsoleteArtifacts(stem) {
+function obsoleteArtifacts(stem, compareF32) {
   const wasmCandidates = [
     'plain-embedded',
     'plain-embedded-min',
@@ -141,16 +147,18 @@ function obsoleteArtifacts(stem) {
     'Oz-external-min',
   ];
   const javascriptCandidates = ['js-unminified', 'js-min', 'f32-unminified', 'f32-min'];
-  return [
+  const artifacts = [
     `${stem}.plain.wasm`,
     `${stem}.Oz.wasm`,
     ...wasmCandidates.map((id) => `${stem}.${id}.zip`),
     ...javascriptCandidates.map((id) => `${stem}.${id}.zip`),
   ];
+  if (!compareF32) artifacts.push(`${stem}.f32.js`, `${stem}.f32.html`, `${stem}.f32.zip`);
+  return artifacts;
 }
 
-async function removeObsoleteArtifacts(output, stem) {
-  for (const name of obsoleteArtifacts(stem)) await rm(join(output, name), {force: true});
+async function removeObsoleteArtifacts(output, stem, compareF32) {
+  for (const name of obsoleteArtifacts(stem, compareF32)) await rm(join(output, name), {force: true});
 }
 
 function finalArchiveFor(candidate, stem, bestWasm, bestJs, bestF32) {
@@ -247,7 +255,9 @@ async function buildInStaging(options, sourceText, staging) {
     }
   }
 
-  for (const profile of [{name: 'js', precision: 'native'}, {name: 'f32', precision: 'f32'}]) {
+  const profiles = [{name: 'js', precision: 'native'}];
+  if (options.compareF32) profiles.push({name: 'f32', precision: 'f32'});
+  for (const profile of profiles) {
     const result = compileJavaScript(sourceText, {precision: profile.precision});
     if (result.precision !== profile.precision) throw new Error(`JavaScript backend returned ${result.precision} for ${profile.precision}`);
     const codeArtifact = profile.name === 'js' ? `${stem}.js` : `${stem}.f32.js`;
@@ -282,9 +292,9 @@ async function buildInStaging(options, sourceText, staging) {
   const select = (items) => items.slice().sort((a, b) => a.zipBytes - b.zipBytes || a.id.localeCompare(b.id))[0];
   const bestWasm = select(records.filter((candidate) => candidate.backend === 'wasm'));
   const bestJs = select(records.filter((candidate) => candidate.backend === 'js' && candidate.precision === 'native'));
-  const bestF32 = select(records.filter((candidate) => candidate.backend === 'js' && candidate.precision === 'f32'));
+  const bestF32 = options.compareF32 ? select(records.filter((candidate) => candidate.backend === 'js' && candidate.precision === 'f32')) : null;
   const bestOverall = select(records);
-  if (!bestWasm || !bestJs || !bestF32) throw new Error('Build produced no complete backend candidates');
+  if (!bestWasm || !bestJs || (options.compareF32 && !bestF32)) throw new Error('Build produced no complete backend candidates');
 
   const wasmPath = join(staging, `${stem}.wasm`);
   await writeFile(wasmPath, bestWasm.bytes);
@@ -292,8 +302,10 @@ async function buildInStaging(options, sourceText, staging) {
   await copyFile(join(staging, bestWasm.archive), join(staging, `${stem}.zip`));
   await writeFile(join(staging, `${stem}.js.html`), bestJs.html);
   await copyFile(join(staging, bestJs.archive), join(staging, `${stem}.js.zip`));
-  await writeFile(join(staging, `${stem}.f32.html`), bestF32.html);
-  await copyFile(join(staging, bestF32.archive), join(staging, `${stem}.f32.zip`));
+  if (bestF32) {
+    await writeFile(join(staging, `${stem}.f32.html`), bestF32.html);
+    await copyFile(join(staging, bestF32.archive), join(staging, `${stem}.f32.zip`));
+  }
 
   const wasmDis = configuredExecutable('wasm-dis', process.env.SLIM_WASM_DIS, optimizer);
   if (!wasmDis) throw new Error('wasm-dis is required to write the selected WAT artifact; set SLIM_WASM_DIS or add wasm-dis to PATH');
@@ -302,6 +314,20 @@ async function buildInStaging(options, sourceText, staging) {
   const wat = await readFile(watPath, 'utf8');
   if (!wat.includes('(module')) throw new Error('wasm-dis did not emit a module WAT artifact');
 
+  const artifacts = {
+    wasm: `${stem}.wasm`,
+    wat: `${stem}.wat`,
+    html: `${stem}.html`,
+    js: `${stem}.js`,
+    jsHtml: `${stem}.js.html`,
+    jsZip: `${stem}.js.zip`,
+    zip: `${stem}.zip`,
+  };
+  if (bestF32) Object.assign(artifacts, {
+    f32Js: `${stem}.f32.js`,
+    f32Html: `${stem}.f32.html`,
+    f32Zip: `${stem}.f32.zip`,
+  });
   const report = {
     version: 3,
     source: basename(options.source),
@@ -311,23 +337,12 @@ async function buildInStaging(options, sourceText, staging) {
     selected: bestWasm.id,
     selectedWasm: candidateSummary({...bestWasm, reportArchive: `${stem}.zip`}),
     selectedJs: candidateSummary({...bestJs, reportArchive: `${stem}.js.zip`}),
-    selectedF32: candidateSummary({...bestF32, reportArchive: `${stem}.f32.zip`}),
+    selectedF32: bestF32 ? candidateSummary({...bestF32, reportArchive: `${stem}.f32.zip`}) : null,
     selectedOverall: candidateSummary({...bestOverall, reportArchive: finalArchiveFor(bestOverall, stem, bestWasm, bestJs, bestF32)}),
     layout: bestWasm.layout,
     zipBytes: bestWasm.zipBytes,
     remaining: budget - bestWasm.zipBytes,
-    artifacts: {
-      wasm: `${stem}.wasm`,
-      wat: `${stem}.wat`,
-      html: `${stem}.html`,
-      js: `${stem}.js`,
-      jsHtml: `${stem}.js.html`,
-      jsZip: `${stem}.js.zip`,
-      f32Js: `${stem}.f32.js`,
-      f32Html: `${stem}.f32.html`,
-      f32Zip: `${stem}.f32.zip`,
-      zip: `${stem}.zip`,
-    },
+    artifacts,
     candidates: records.map((candidate) => candidateSummary({
       ...candidate,
       reportArchive: finalArchiveFor(candidate, stem, bestWasm, bestJs, bestF32),
@@ -343,13 +358,11 @@ async function buildInStaging(options, sourceText, staging) {
     `${stem}.js`,
     `${stem}.js.html`,
     `${stem}.js.zip`,
-    `${stem}.f32.js`,
-    `${stem}.f32.html`,
-    `${stem}.f32.zip`,
     `${stem}.zip`,
   ];
+  if (bestF32) finalNames.splice(7, 0, `${stem}.f32.js`, `${stem}.f32.html`, `${stem}.f32.zip`);
   for (const name of finalNames) await copyFile(join(staging, name), join(options.output, name));
-  await removeObsoleteArtifacts(options.output, stem);
+  await removeObsoleteArtifacts(options.output, stem, options.compareF32);
   console.log(JSON.stringify(report, null, 2));
   if (bestWasm.zipBytes > budget) process.exitCode = 1;
   if (options.check && process.exitCode) throw new Error('Selected WASM package exceeds the size budget');

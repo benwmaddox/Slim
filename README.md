@@ -24,12 +24,16 @@ plain and optional Binaryen -Oz, and original versus Terser-minified scripts.
 It selects by complete ZIP size, including archive overhead.
 
 `rainbow.js.html` / `rainbow.js.zip` contain the native JavaScript version;
-`rainbow.f32.html` / `rainbow.f32.zip` preserve the WASM numeric behavior.
-Readable generated factories are `rainbow.js` and `rainbow.f32.js`.
+`rainbow.js` is its readable generated factory.
 `rainbow.size.json` records every candidate against the 13,312-byte target.
-Only the 11 final files above are retained. Optimizer intermediates and packaging
+Only these eight final files are retained. Optimizer intermediates and packaging
 candidates are measured in a temporary directory and discarded. Successful builds
 also remove obsolete candidate files for the current source basename.
+
+For numeric comparisons, `npm run build -- --compare-f32` additionally emits
+`rainbow.f32.js`, `rainbow.f32.html`, and `rainbow.f32.zip`. Normal builds remove
+these optional outputs. To browser-check that comparison, pass
+`--profiles=wasm,js-native,js-f32` to `tools/browser-check.mjs`.
 Archives use top-level `index.html`, as required by the supplied rules; an
 external WASM layout also contains `rainbow.wasm`. Inspection artifacts and
 development dependencies are excluded.

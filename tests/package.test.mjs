@@ -15,8 +15,8 @@ function runPython(args) {
   return spawnSync(python, args, {encoding: 'utf8'});
 }
 
-function runBuild(source, output) {
-  const result = spawnSync(process.execPath, [buildTool, source, '--out-dir', output], {
+function runBuild(source, output, flags = []) {
+  const result = spawnSync(process.execPath, [buildTool, source, '--out-dir', output, ...flags], {
     encoding: 'utf8',
     env: {...process.env},
     windowsHide: true,
@@ -102,8 +102,9 @@ fn frame() { tri(x, 100, x + 20, 100, x, 120, 0.2, 0.7, 1); }
     const expected = [
       `${stem}.wasm`, `${stem}.wat`, `${stem}.html`, `${stem}.size.json`,
       `${stem}.js`, `${stem}.js.html`, `${stem}.js.zip`,
-      `${stem}.f32.js`, `${stem}.f32.html`, `${stem}.f32.zip`, `${stem}.zip`,
+      `${stem}.zip`,
     ];
+    const compareExpected = expected.concat([`${stem}.f32.js`, `${stem}.f32.html`, `${stem}.f32.zip`]);
     const actualNames = (await readdir(output)).sort();
     assert.deepEqual(actualNames, [...expected, 'keep.txt', otherStem].sort());
     for (const name of expected) assert.ok((await stat(join(output, name))).isFile(), `missing ${name}`);
@@ -122,22 +123,20 @@ fn frame() { tri(x, 100, x + 20, 100, x, 120, 0.2, 0.7, 1); }
     assert.equal(report.version, 3);
     assert.equal(report.selectedWasm.backend, 'wasm');
     assert.equal(report.selectedJs.precision, 'native');
-    assert.equal(report.selectedF32.precision, 'f32');
+    assert.equal(report.selectedF32, null);
     assert.equal(report.selectedWasm.archive, `${stem}.zip`);
     assert.equal(report.selectedJs.archive, `${stem}.js.zip`);
-    assert.equal(report.selectedF32.archive, `${stem}.f32.zip`);
-    assert.ok([`${stem}.zip`, `${stem}.js.zip`, `${stem}.f32.zip`].includes(report.selectedOverall.archive));
+    assert.ok([`${stem}.zip`, `${stem}.js.zip`].includes(report.selectedOverall.archive));
+    assert.deepEqual(Object.keys(report.artifacts).sort(), ['html', 'js', 'jsHtml', 'jsZip', 'wat', 'wasm', 'zip'].sort());
     assert.ok(report.candidates.some((candidate) => candidate.id === 'plain-embedded'));
     assert.ok(report.candidates.some((candidate) => candidate.id === 'plain-external'));
     assert.ok(report.candidates.some((candidate) => candidate.id === 'js-unminified'));
     assert.ok(report.candidates.some((candidate) => candidate.id === 'js-min'));
-    assert.ok(report.candidates.some((candidate) => candidate.id === 'f32-unminified'));
-    assert.ok(report.candidates.some((candidate) => candidate.id === 'f32-min'));
+    assert.equal(report.candidates.some((candidate) => candidate.id.startsWith('f32-')), false);
     assert.ok(report.candidates.every((candidate) => candidate.zipBytes > 0));
     const selectedArchives = new Map([
       [report.selectedWasm.id, report.selectedWasm.archive],
       [report.selectedJs.id, report.selectedJs.archive],
-      [report.selectedF32.id, report.selectedF32.archive],
     ]);
     for (const candidate of report.candidates) {
       assert.equal(candidate.archive, selectedArchives.get(candidate.id) ?? null, `${candidate.id} archive retention`);
@@ -152,10 +151,6 @@ fn frame() { tri(x, 100, x + 20, 100, x, 120, 0.2, 0.7, 1); }
     const jsZip = inspectZip(join(output, `${stem}.js.zip`));
     assert.deepEqual(jsZip.names, ['index.html']);
     assert.equal(jsZip.index, await readFile(join(output, `${stem}.js.html`), 'utf8'));
-    const f32Zip = inspectZip(join(output, `${stem}.f32.zip`));
-    assert.deepEqual(f32Zip.names, ['index.html']);
-    assert.equal(f32Zip.index, await readFile(join(output, `${stem}.f32.html`), 'utf8'));
-
     for (const [id, archiveName] of selectedArchives) {
       const candidate = report.candidates.find((item) => item.id === id);
       const archivePath = join(output, archiveName);
@@ -167,7 +162,25 @@ fn frame() { tri(x, 100, x + 20, 100, x, 120, 0.2, 0.7, 1); }
     const stableNames = expected;
     const before = new Map();
     for (const name of stableNames) before.set(name, digest(await readFile(join(output, name))));
+    runBuild(source, output, ['--compare-f32']);
+    assert.deepEqual((await readdir(output)).sort(), [...compareExpected, 'keep.txt', otherStem].sort());
+    const compared = JSON.parse(await readFile(join(output, `${stem}.size.json`), 'utf8'));
+    assert.equal(compared.selectedF32.precision, 'f32');
+    assert.equal(compared.selectedF32.archive, `${stem}.f32.zip`);
+    assert.equal(compared.artifacts.f32Js, `${stem}.f32.js`);
+    assert.equal(compared.artifacts.f32Html, `${stem}.f32.html`);
+    assert.equal(compared.artifacts.f32Zip, `${stem}.f32.zip`);
+    assert.ok(compared.candidates.some((candidate) => candidate.id === 'f32-unminified'));
+    assert.ok(compared.candidates.some((candidate) => candidate.id === 'f32-min'));
+    const comparedF32 = compared.candidates.find((candidate) => candidate.id === compared.selectedF32.id);
+    assert.equal((await stat(join(output, compared.selectedF32.archive))).size, comparedF32.zipBytes);
+    const f32Zip = inspectZip(join(output, `${stem}.f32.zip`));
+    assert.deepEqual(f32Zip.names, ['index.html']);
+    assert.equal(f32Zip.index, await readFile(join(output, `${stem}.f32.html`), 'utf8'));
+
     runBuild(source, output);
+    assert.deepEqual((await readdir(output)).sort(), [...expected, 'keep.txt', otherStem].sort());
+    assert.equal((await readdir(output)).some((name) => name.startsWith(`${stem}.f32.`)), false);
     for (const [name, hash] of before) assert.equal(digest(await readFile(join(output, name))), hash, `${name} must be deterministic`);
   } finally {
     await rm(directory, {recursive: true, force: true});
