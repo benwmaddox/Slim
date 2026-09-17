@@ -11,13 +11,14 @@ import {minifyHtml} from './minify.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function usage() {
-  console.log('Usage: node tools/compare-state.mjs [source.slim] [--out-dir DIR] [--keyboard-only]');
+  console.log('Usage: node tools/compare-state.mjs [source.slim] [--out-dir DIR] [--keyboard-only] [--pack-triangles NAME]');
 }
 
 function parseArgs(argv) {
   let source;
   let outDir;
   let keyboardOnly = false;
+  const packedTriangleArrays = [];
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') {
@@ -26,6 +27,12 @@ function parseArgs(argv) {
     }
     if (argument === '--keyboard-only') {
       keyboardOnly = true;
+      continue;
+    }
+    if (argument === '--pack-triangles' || argument.startsWith('--pack-triangles=')) {
+      const name = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : argv[++index];
+      if (!name || name.startsWith('-')) throw new Error('--pack-triangles requires an array name');
+      packedTriangleArrays.push(name);
       continue;
     }
     if (argument === '--out-dir' || argument.startsWith('--out-dir=')) {
@@ -48,6 +55,7 @@ function parseArgs(argv) {
     source: resolvedSource,
     output: resolve(root, outDir || join('output', 'state-comparison', stem)),
     keyboardOnly,
+    packedTriangleArrays,
     stem,
   };
 }
@@ -159,14 +167,6 @@ async function main() {
   const zipTool = resolve(root, 'tools/zip.py');
   const optimizer = configuredExecutable('wasm-opt', process.env.SLIM_WASM_OPT);
   const disassembler = configuredExecutable('wasm-dis', process.env.SLIM_WASM_DIS);
-  await mkdir(options.output, {recursive: true});
-  for (const name of [
-    'report.json',
-    `${options.stem}.globals.wasm`, `${options.stem}.globals.wat`, `${options.stem}.globals.zip`,
-    `${options.stem}.memory.wasm`, `${options.stem}.memory.wat`, `${options.stem}.memory.zip`,
-  ]) {
-    await rm(join(options.output, name), {force: true});
-  }
 
   const staging = await mkdtemp(join(tmpdir(), 'slim-state-compare-'));
   const allCandidates = [];
@@ -177,7 +177,10 @@ async function main() {
       {storage: 'globals', label: 'globals'},
       {storage: 'memory', label: 'memory'},
     ]) {
-      const detailed = compileDetailed(sourceText, {globalStorage: profile.storage});
+      const detailed = compileDetailed(sourceText, {
+        globalStorage: profile.storage,
+        packedTriangleArrays: options.packedTriangleArrays,
+      });
       const plain = detailed.wasm;
       if (!WebAssembly.validate(plain)) throw new Error(`${profile.storage} compiler output is invalid WASM`);
       const modules = [{optimization: 'plain', bytes: plain}];
@@ -255,6 +258,15 @@ async function main() {
       });
     }
 
+    // Preserve previous results until all compiler/optimizer candidates succeed.
+    await mkdir(options.output, {recursive: true});
+    for (const name of [
+      'report.json',
+      `${options.stem}.globals.wasm`, `${options.stem}.globals.wat`, `${options.stem}.globals.zip`,
+      `${options.stem}.memory.wasm`, `${options.stem}.memory.wat`, `${options.stem}.memory.zip`,
+    ]) {
+      await rm(join(options.output, name), {force: true});
+    }
     const artifacts = {};
     for (const storage of ['globals', 'memory']) {
       const result = profileResults.get(storage);

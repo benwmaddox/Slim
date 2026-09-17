@@ -81,7 +81,12 @@ Enemy pools share update loops, and characters use an atlas of reusable triangle
 parts with translation, scale, flip, and pose transforms. This exercises content
 reuse rather than adding a general game engine.
 
-Normal builds keep eight files under the `shardbound` basename. Serve
+`npm run build:shardbound` enables the packed-triangle prototype for the immutable
+`ATLAS` array. The JavaScript profile remains the normal numeric-array build, so
+the command still compares the packed WASM package against the same native JS
+profile. Directly invoke `tools/build.mjs` without `--pack-triangles` for the
+unpacked control. Both builds keep eight files under the `shardbound` basename.
+Serve
 `dist/shardbound.html` or open `dist/shardbound.js.html` for the native JS version.
 
 ## Initial language
@@ -208,6 +213,10 @@ values. Locals and parameters can shadow array names as scalar values.
 See [CONTENT_PLAN.md](CONTENT_PLAN.md) for the implementation contract and
 [ARRAY_PLAN.md](ARRAY_PLAN.md) for the earlier unchecked experiment. Its sizes
 are historical, rather than promises for checked indexing.
+
+The immutable triangle-array packing experiment is described in
+[PACKED_TRIANGLES.md](PACKED_TRIANGLES.md). It is enabled only for selected WASM
+builds and leaves `compileJavaScript(source)` unchanged.
 
 `node tools/compare-wasm-opt.mjs` compares optimizer settings by complete ZIP
 size and validates gameplay callbacks. Reports go under `output`. See

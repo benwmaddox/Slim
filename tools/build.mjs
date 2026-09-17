@@ -13,7 +13,15 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const budget = 13312;
 
 function usage() {
-  console.log('Usage: node tools/build.mjs [source.slim] [--out-dir DIR] [--check] [--compare-f32] [--keyboard-only]');
+  console.log('Usage: node tools/build.mjs [source.slim] [--out-dir DIR] [--check] [--compare-f32] [--keyboard-only] [--pack-triangles NAME]');
+}
+
+function parsePackedTriangleNames(value) {
+  const names = value.split(',').map((name) => name.trim()).filter(Boolean);
+  if (!names.length || names.some((name) => name.startsWith('-'))) {
+    throw new Error('--pack-triangles requires an array name');
+  }
+  return names;
 }
 
 function parseArgs(argv) {
@@ -22,6 +30,7 @@ function parseArgs(argv) {
   let check = false;
   let compareF32 = false;
   let keyboardOnly = false;
+  const packedTriangleArrays = [];
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') {
@@ -38,6 +47,12 @@ function parseArgs(argv) {
     }
     if (argument === '--keyboard-only') {
       keyboardOnly = true;
+      continue;
+    }
+    if (argument === '--pack-triangles' || argument.startsWith('--pack-triangles=')) {
+      const value = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : argv[++index];
+      if (!value || value.startsWith('-')) throw new Error('--pack-triangles requires an array name');
+      packedTriangleArrays.push(...parsePackedTriangleNames(value));
       continue;
     }
     if (argument === '--out-dir' || argument.startsWith('--out-dir=')) {
@@ -60,6 +75,7 @@ function parseArgs(argv) {
     check,
     compareF32,
     keyboardOnly,
+    packedTriangleArrays: [...new Set(packedTriangleArrays)],
   };
 }
 
@@ -177,7 +193,6 @@ function finalArchiveFor(candidate, stem, bestWasm, bestJs, bestF32) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const sourceText = await readFile(options.source, 'utf8');
-  await mkdir(options.output, {recursive: true});
 
   const staging = await mkdtemp(join(tmpdir(), 'slim-build-'));
   try {
@@ -198,7 +213,10 @@ async function buildInStaging(options, sourceText, staging) {
   const records = [];
   const wasmModules = [];
 
-  const detailed = compileDetailed(sourceText);
+  const compilerOptions = options.packedTriangleArrays.length
+    ? {packedTriangleArrays: options.packedTriangleArrays}
+    : {};
+  const detailed = compileDetailed(sourceText, compilerOptions);
   const plainBytes = detailed.wasm;
   if (!WebAssembly.validate(plainBytes)) throw new Error('Compiler emitted invalid WASM');
   const plainPath = join(staging, `${stem}.plain.wasm`);
@@ -351,7 +369,9 @@ async function buildInStaging(options, sourceText, staging) {
     stem,
     title,
     keyboardOnly: options.keyboardOnly,
+    packedTriangleArrays: options.packedTriangleArrays,
     compiler: {
+      packedTriangleArrays: options.packedTriangleArrays,
       globalStorage: detailed.globalStorage,
       globals: detailed.globals,
       memoryPages: detailed.memoryPages,
@@ -386,6 +406,7 @@ async function buildInStaging(options, sourceText, staging) {
     `${stem}.zip`,
   ];
   if (bestF32) finalNames.splice(7, 0, `${stem}.f32.js`, `${stem}.f32.html`, `${stem}.f32.zip`);
+  await mkdir(options.output, {recursive: true});
   for (const name of finalNames) await copyFile(join(staging, name), join(options.output, name));
   await removeObsoleteArtifacts(options.output, stem, options.compareF32);
   console.log(JSON.stringify(report, null, 2));

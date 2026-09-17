@@ -82,6 +82,13 @@ const sourceDefinitions = [
   },
 ];
 
+// Keep the unpacked control alongside the packed atlas experiment.
+sourceDefinitions.push({
+  ...sourceDefinitions.find((definition) => definition.id === 'shardbound'),
+  id: 'shardbound-packed',
+  compilerOptions: {packedTriangleArrays: ['ATLAS']},
+});
+
 function pathExecutable(name) {
   const extensions = process.platform === 'win32'
     ? (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';')
@@ -475,7 +482,7 @@ async function runDefinition({definition, sourceText, profiles, tools, staging})
   const gameId = definition.id;
   const gameRoot = join(staging, gameId);
   await mkdir(gameRoot, {recursive: true});
-  const detailed = compileDetailed(sourceText);
+  const detailed = compileDetailed(sourceText, definition.compilerOptions);
   const plainBytes = detailed.wasm;
   const input = {
     kind: 'fresh-production-compiler',
@@ -488,6 +495,10 @@ async function runDefinition({definition, sourceText, profiles, tools, staging})
   const baselineMeta = moduleMetadata(plainBytes, `${gameId}/plain`);
   const baseline = instantiate(plainBytes, definition, `${gameId}/plain`);
   const trace = await traceFor(definition);
+  if (definition.compilerOptions?.packedTriangleArrays?.length) {
+    const unpacked = instantiate(compileDetailed(sourceText).wasm, definition, `${gameId}/unpacked-control`);
+    input.unpackedParity = inputsEqualTrace(trace, `${gameId}/packing`, unpacked, baseline);
+  }
   const candidates = [];
   for (const profile of profiles) {
     let bytes;
