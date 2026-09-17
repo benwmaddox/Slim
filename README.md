@@ -69,10 +69,11 @@ WASM with a repeatable keyboard route, jumping, loss/restart, and GPU output.
 ## Initial language
 
 ```text
+const INPUT_RIGHT = 1;
 global x = 100;
 fn init() { x = 100; }
 fn frame() {
-  x = x + input(1) - input(0);
+  x = x + input(INPUT_RIGHT) - input(0);
   tri(x, 100, x + 20, 100, x, 120, 1, 0, 0);
 }
 ```
@@ -90,6 +91,26 @@ constant initializers round at each f32 operation. `%` is implemented as
 and can lose precision for large quotients. No arrays,
 strings, allocation, classes, or modules yet. WASM is emitted directly; no C,
 Rust, LLVM, or language runtime is required to build a game.
+
+## Compile-time constants
+
+Top-level constants give numbers meaningful names without runtime storage:
+
+```text
+const STATE_PLAYING = 0;
+const STATE_WON = 1;
+const JUMP_SPEED = 12 + 3;
+global state = STATE_PLAYING;
+```
+
+Constants may reference other constants, including later declarations. Their
+numeric expressions use Slim's f32 arithmetic at compile time. Constants cannot
+depend on mutable globals or calls, and cannot be assigned to. Function parameters
+and locals may shadow a constant, following the existing function scope rules.
+The compiler replaces constant references with numeric literals before either
+backend runs. No constant declarations, names, globals, or lookup code ship in
+the game. Both examples use constants for game states, input indices, and sound
+events.
 
 ## WASM state storage experiment
 

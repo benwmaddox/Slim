@@ -116,6 +116,20 @@ initial data, persistent mutation, local shadowing, f32 special values, and
 layouts extending beyond the first 64 KB page. WAT uses the disassembler's output
 without a readability pass.
 
+## Named constants
+
+Slim supports top-level numeric `const NAME = expression;` declarations.
+Constants use compile-time f32 evaluation, can reference later constants, and
+are inlined by the shared frontend. Cycles, nonconstant initializers, name
+collisions, and assignment to an unshadowed constant are compile errors.
+Function parameters and locals retain their existing shadowing rules.
+
+Both samples now name game states, input indices, and sound events. Their WASM
+binaries in both state-storage modes and their native/f32 JavaScript are
+byte-identical to the saved literal-only sources. All four selected game ZIPs
+also match their previous SHA256 hashes after fresh builds. The source clarity
+adds no runtime storage, instructions, host code, dependencies, or package bytes.
+
 ## Language and runtime limits
 
 No arrays, strings, heap, modules, or compound assignment. Function-scoped locals

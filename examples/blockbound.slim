@@ -1,3 +1,18 @@
+const SOUND_JUMP = 0;
+const SOUND_STOMP = 1;
+const SOUND_LOSS = 2;
+const SOUND_WIN = 3;
+
+const STATE_PLAYING = 0;
+const STATE_WON = 1;
+const STATE_LOST = 2;
+
+const INPUT_LEFT = 0;
+const INPUT_RIGHT = 1;
+const INPUT_ACTION_HELD = 4;
+const INPUT_ACTION_PRESSED = 5;
+const INPUT_RESTART = 9;
+
 // Blockbound is a warm, triangle-only courier run through a broken valley.
 // World coordinates use a 500 foot line, while the camera follows the fox.
 
@@ -10,7 +25,7 @@ global player_facing = 1;
 global player_pose = 0;
 global jump_hold = 0;
 global camera_x = 0;
-global state = 0;
+global state = STATE_PLAYING;
 global walk_clock = 0;
 global progress_marks = 0;
 
@@ -421,17 +436,17 @@ fn terminal_loss() {
 
 fn scene() {
   background();
-  if (state == 0) {
+  if (state == STATE_PLAYING) {
     course();
     enemies();
     beacon();
     hero(player_x, player_y, player_facing, player_pose);
     hud();
   }
-  if (state == 1) {
+  if (state == STATE_WON) {
     terminal_win();
   }
-  if (state == 2) {
+  if (state == STATE_LOST) {
     terminal_loss();
   }
 }
@@ -459,7 +474,7 @@ fn init() {
   player_pose = 0;
   jump_hold = 0;
   camera_x = 0;
-  state = 0;
+  state = STATE_PLAYING;
   walk_clock = 0;
   progress_marks = 0;
   reset_enemies();
@@ -471,110 +486,110 @@ fn update_enemies() {
     if (player_vy > 0 && before < 464) {
       enemy0_alive = 0;
       player_vy = -8;
-      sound(1, 5, 0.18);
+      sound(SOUND_STOMP, 5, 0.18);
     } else {
-      state = 2;
-      sound(2, -5, 0.22);
+      state = STATE_LOST;
+      sound(SOUND_LOSS, -5, 0.22);
     }
   }
   if (enemy1_alive == 1 && absolute(player_x - 1140) < 31 && absolute(player_y - (404 - 25)) < 29) {
     if (player_vy > 0 && before < 368) {
       enemy1_alive = 0;
       player_vy = -8;
-      sound(1, 5, 0.18);
+      sound(SOUND_STOMP, 5, 0.18);
     } else {
-      state = 2;
-      sound(2, -5, 0.22);
+      state = STATE_LOST;
+      sound(SOUND_LOSS, -5, 0.22);
     }
   }
   if (enemy2_alive == 1 && absolute(player_x - 1540) < 31 && absolute(player_y - (372 - 25)) < 29) {
     if (player_vy > 0 && before < 336) {
       enemy2_alive = 0;
       player_vy = -8;
-      sound(1, 5, 0.18);
+      sound(SOUND_STOMP, 5, 0.18);
     } else {
-      state = 2;
-      sound(2, -5, 0.22);
+      state = STATE_LOST;
+      sound(SOUND_LOSS, -5, 0.22);
     }
   }
   if (enemy3_alive == 1 && absolute(player_x - 1780) < 31 && absolute(player_y - (372 - 25)) < 29) {
     if (player_vy > 0 && before < 336) {
       enemy3_alive = 0;
       player_vy = -8;
-      sound(1, 5, 0.18);
+      sound(SOUND_STOMP, 5, 0.18);
     } else {
-      state = 2;
-      sound(2, -5, 0.22);
+      state = STATE_LOST;
+      sound(SOUND_LOSS, -5, 0.22);
     }
   }
   if (enemy4_alive == 1 && absolute(player_x - 3400) < 31 && absolute(player_y - (500 - 25)) < 29) {
     if (player_vy > 0 && before < 464) {
       enemy4_alive = 0;
       player_vy = -8;
-      sound(1, 5, 0.18);
+      sound(SOUND_STOMP, 5, 0.18);
     } else {
-      state = 2;
-      sound(2, -5, 0.22);
+      state = STATE_LOST;
+      sound(SOUND_LOSS, -5, 0.22);
     }
   }
   if (enemy5_alive == 1 && absolute(player_x - 4385) < 31 && absolute(player_y - (404 - 25)) < 29) {
     if (player_vy > 0 && before < 368) {
       enemy5_alive = 0;
       player_vy = -8;
-      sound(1, 5, 0.18);
+      sound(SOUND_STOMP, 5, 0.18);
     } else {
-      state = 2;
-      sound(2, -5, 0.22);
+      state = STATE_LOST;
+      sound(SOUND_LOSS, -5, 0.22);
     }
   }
   if (enemy6_alive == 1 && absolute(player_x - 4765) < 31 && absolute(player_y - (436 - 25)) < 29) {
     if (player_vy > 0 && before < 400) {
       enemy6_alive = 0;
       player_vy = -8;
-      sound(1, 5, 0.18);
+      sound(SOUND_STOMP, 5, 0.18);
     } else {
-      state = 2;
-      sound(2, -5, 0.22);
+      state = STATE_LOST;
+      sound(SOUND_LOSS, -5, 0.22);
     }
   }
   if (enemy7_alive == 1 && absolute(player_x - 5400) < 31 && absolute(player_y - (500 - 25)) < 29) {
     if (player_vy > 0 && before < 464) {
       enemy7_alive = 0;
       player_vy = -8;
-      sound(1, 5, 0.18);
+      sound(SOUND_STOMP, 5, 0.18);
     } else {
-      state = 2;
-      sound(2, -5, 0.22);
+      state = STATE_LOST;
+      sound(SOUND_LOSS, -5, 0.22);
     }
   }
   if (enemy8_alive == 1 && absolute(player_x - 6000) < 31 && absolute(player_y - (392 - 25)) < 29) {
     if (player_vy > 0 && before < 356) {
       enemy8_alive = 0;
       player_vy = -8;
-      sound(1, 5, 0.18);
+      sound(SOUND_STOMP, 5, 0.18);
     } else {
-      state = 2;
-      sound(2, -5, 0.22);
+      state = STATE_LOST;
+      sound(SOUND_LOSS, -5, 0.22);
     }
   }
   if (enemy9_alive == 1 && absolute(player_x - 6420) < 31 && absolute(player_y - (500 - 25)) < 29) {
     if (player_vy > 0 && before < 464) {
       enemy9_alive = 0;
       player_vy = -8;
-      sound(1, 5, 0.18);
+      sound(SOUND_STOMP, 5, 0.18);
     } else {
-      state = 2;
-      sound(2, -5, 0.22);
+      state = STATE_LOST;
+      sound(SOUND_LOSS, -5, 0.22);
     }
   }
 }
 
 fn update_player() {
   let direction = 0;
-  if (input(0) > 0) {
+  if (input(INPUT_LEFT) > 0) {
     direction = direction - 1;
   }
-  if (input(1) > 0) {
+  if (input(INPUT_RIGHT) > 0) {
     direction = direction + 1;
   }
   if (direction != 0) {
@@ -585,13 +600,13 @@ fn update_player() {
   }
   player_vx = clamp(player_vx, -6, 6);
 
-  if (input(5) > 0 && player_ground == 1) {
+  if (input(INPUT_ACTION_PRESSED) > 0 && player_ground == 1) {
     player_vy = -15;
     player_ground = 0;
     jump_hold = 8;
-    sound(0, 8, 0.08);
+    sound(SOUND_JUMP, 8, 0.08);
   }
-  if (input(4) > 0 && player_vy < 0 && jump_hold > 0) {
+  if (input(INPUT_ACTION_HELD) > 0 && player_vy < 0 && jump_hold > 0) {
     player_vy = player_vy - 0.30;
     jump_hold = jump_hold - 1;
   } else {
@@ -615,15 +630,15 @@ fn update_player() {
     player_ground = 0;
   }
   if (player_y > 680) {
-    state = 2;
-    sound(2, -5, 0.22);
+    state = STATE_LOST;
+    sound(SOUND_LOSS, -5, 0.22);
   }
 
   update_enemies();
-  if (player_x > 6620 && state == 0) {
-    state = 1;
+  if (player_x > 6620 && state == STATE_PLAYING) {
+    state = STATE_WON;
     progress_marks = 1;
-    sound(3, 12, 0.22);
+    sound(SOUND_WIN, 12, 0.22);
   }
   if (player_x > 1000 && progress_marks == 0) {
     progress_marks = 1;
@@ -665,11 +680,11 @@ fn update() {
 }
 
 fn frame() {
-  if (input(9) > 0) {
+  if (input(INPUT_RESTART) > 0) {
     init();
-  } else if (state == 0) {
+  } else if (state == STATE_PLAYING) {
     update();
-  } else if (input(5) > 0) {
+  } else if (input(INPUT_ACTION_PRESSED) > 0) {
     init();
   }
   scene();

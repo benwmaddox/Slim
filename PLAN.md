@@ -34,6 +34,16 @@ ZIP of at most 13,312 bytes, including archive overhead.
 
 ## Subsequent slices, conditional on measurements
 
+### Named numeric constants
+
+- Top-level `const NAME = expression;`, with pure f32 numeric evaluation.
+- Resolve constant references once in the shared frontend, with forward
+  references and cycle diagnostics; inline literals for WASM and JavaScript.
+- Preserve function-scoped local shadowing and reject constant assignment.
+- Replace game-state and input-index magic numbers in both examples.
+- Verify emitted binaries, JavaScript, and complete archives match the prior
+  literal-only examples; no runtime storage or size overhead.
+
 ### Side-scroller check: Blockbound
 
 - Original faceted characters, each at most 50 solid-color triangles.

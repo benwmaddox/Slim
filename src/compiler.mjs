@@ -220,14 +220,23 @@ class Parser {
   parse() {
     const globals = [];
     const globalNames = new Set();
+    const constants = [];
+    const constantNames = new Set();
     const functions = new Map();
 
     while (this.peek().kind !== "eof") {
       const token = this.peek();
       if (token.kind !== "id") {
-        compileError(`expected top-level global or fn, found ${JSON.stringify(token.value)}`, token);
+        compileError(`expected top-level const, global, or fn, found ${JSON.stringify(token.value)}`, token);
       }
-      if (token.value === "global") {
+      if (token.value === "const") {
+        const constant = this.parseConstant();
+        if (constantNames.has(constant.name)) {
+          compileError(`duplicate constant ${JSON.stringify(constant.name)}`, constant.token);
+        }
+        constantNames.add(constant.name);
+        constants.push(constant);
+      } else if (token.value === "global") {
         const global = this.parseGlobal();
         if (globalNames.has(global.name)) {
           compileError(`duplicate global ${JSON.stringify(global.name)}`, global.token);
@@ -244,11 +253,21 @@ class Parser {
         }
         functions.set(fn.name, fn);
       } else {
-        compileError(`expected top-level global or fn, found ${JSON.stringify(token.value)}`, token);
+        compileError(`expected top-level const, global, or fn, found ${JSON.stringify(token.value)}`, token);
       }
     }
 
-    return { globals, functions };
+    const program = { globals, functions };
+    return constants.length === 0 ? program : lowerConstants(program, constants);
+  }
+
+  parseConstant() {
+    const token = this.expect("const");
+    const name = this.expectIdentifier("constant name");
+    this.expect("=");
+    const expression = this.parseExpression();
+    this.expect(";");
+    return { kind: "constant", name: name.value, expression, token };
   }
 
   parseGlobal() {
@@ -424,20 +443,23 @@ class Parser {
   }
 }
 
-function evalConstant(expression) {
+function evalConstant(expression, resolveName, errorMessage = "global initializers must be constant numeric expressions") {
   switch (expression.kind) {
     case "num":
       return Math.fround(expression.value);
+    case "name":
+      if (resolveName) return resolveName(expression.name, expression.token);
+      break;
     case "unary": {
-      const value = evalConstant(expression.expression);
+      const value = evalConstant(expression.expression, resolveName, errorMessage);
       if (expression.op === "+") return value;
       if (expression.op === "-") return Math.fround(-value);
       if (expression.op === "!") return value === 0 ? 1 : 0;
       break;
     }
     case "binary": {
-      const left = evalConstant(expression.left);
-      const right = evalConstant(expression.right);
+      const left = evalConstant(expression.left, resolveName, errorMessage);
+      const right = evalConstant(expression.right, resolveName, errorMessage);
       switch (expression.op) {
         case "+": return Math.fround(left + right);
         case "-": return Math.fround(left - right);
@@ -463,7 +485,147 @@ function evalConstant(expression) {
     default:
       break;
   }
-  compileError("global initializers must be constant numeric expressions", expression.token);
+  compileError(errorMessage, expression.token);
+}
+
+function collectFunctionLocalNames(fn) {
+  const names = new Set(fn.params.map((parameter) => parameter.name));
+  const collectStatements = (statements) => {
+    for (const statement of statements) {
+      if (statement.kind === "let") {
+        names.add(statement.name);
+      } else if (statement.kind === "block") {
+        collectStatements(statement.body);
+      } else if (statement.kind === "if") {
+        collectStatements(statement.thenBlock.body);
+        if (statement.elseBlock) collectStatements(statement.elseBlock.body);
+      } else if (statement.kind === "while") {
+        collectStatements(statement.body.body);
+      }
+    }
+  };
+  collectStatements(fn.body);
+  return names;
+}
+
+function lowerConstants(program, declarations) {
+  const constants = new Map(declarations.map((constant) => [constant.name, constant]));
+  const globalNames = new Set(program.globals.map((global) => global.name));
+  const functionNames = new Set(program.functions.keys());
+
+  for (const constant of declarations) {
+    if (globalNames.has(constant.name)) {
+      compileError(`constant name ${JSON.stringify(constant.name)} collides with a global`, constant.token);
+    }
+    if (functionNames.has(constant.name)) {
+      compileError(`constant name ${JSON.stringify(constant.name)} collides with a function`, constant.token);
+    }
+    if (Object.hasOwn(BUILTINS, constant.name)) {
+      compileError(`constant name ${JSON.stringify(constant.name)} is reserved for a builtin`, constant.token);
+    }
+  }
+
+  const states = new Map();
+  const values = new Map();
+  const evaluate = (name, referenceToken) => {
+    const state = states.get(name);
+    if (state === 1) {
+      compileError(`cyclic constant reference involving ${JSON.stringify(name)}`, referenceToken);
+    }
+    if (state === 2) return values.get(name);
+
+    const declaration = constants.get(name);
+    if (!declaration) {
+      compileError("constant initializers must be constant numeric expressions", referenceToken);
+    }
+
+    states.set(name, 1);
+    const value = evalConstant(
+      declaration.expression,
+      (referenceName, token) => {
+        if (!constants.has(referenceName)) {
+          compileError("constant initializers must be constant numeric expressions", token);
+        }
+        return evaluate(referenceName, token);
+      },
+      "constant initializers must be constant numeric expressions",
+    );
+    states.set(name, 2);
+    values.set(name, value);
+    return value;
+  };
+
+  for (const declaration of declarations) evaluate(declaration.name, declaration.token);
+
+  const lowerExpression = (expression, shadowed) => {
+    switch (expression.kind) {
+      case "name":
+        if (!shadowed.has(expression.name) && constants.has(expression.name)) {
+          return {kind: "num", value: values.get(expression.name), token: expression.token};
+        }
+        return expression;
+      case "unary":
+        expression.expression = lowerExpression(expression.expression, shadowed);
+        return expression;
+      case "binary":
+        expression.left = lowerExpression(expression.left, shadowed);
+        expression.right = lowerExpression(expression.right, shadowed);
+        return expression;
+      case "call":
+        expression.args = expression.args.map((argument) => lowerExpression(argument, shadowed));
+        return expression;
+      default:
+        return expression;
+    }
+  };
+
+  for (const global of program.globals) {
+    global.expression = lowerExpression(global.expression, new Set());
+  }
+
+  const lowerStatements = (statements, shadowed) => {
+    for (const statement of statements) {
+      switch (statement.kind) {
+        case "let":
+          statement.expression = lowerExpression(statement.expression, shadowed);
+          break;
+        case "assign":
+          if (!shadowed.has(statement.name) && constants.has(statement.name)) {
+            compileError(`cannot assign to constant ${JSON.stringify(statement.name)}`, statement.token);
+          }
+          statement.expression = lowerExpression(statement.expression, shadowed);
+          break;
+        case "expr":
+          statement.expression = lowerExpression(statement.expression, shadowed);
+          break;
+        case "return":
+          if (statement.expression) {
+            statement.expression = lowerExpression(statement.expression, shadowed);
+          }
+          break;
+        case "if":
+          statement.condition = lowerExpression(statement.condition, shadowed);
+          lowerStatements(statement.thenBlock.body, shadowed);
+          if (statement.elseBlock) lowerStatements(statement.elseBlock.body, shadowed);
+          break;
+        case "while":
+          statement.condition = lowerExpression(statement.condition, shadowed);
+          lowerStatements(statement.body.body, shadowed);
+          break;
+        case "block":
+          lowerStatements(statement.body, shadowed);
+          break;
+        default:
+          break;
+      }
+    }
+  };
+
+  for (const fn of program.functions.values()) {
+    lowerStatements(fn.body, collectFunctionLocalNames(fn));
+  }
+
+  return program;
 }
 
 function walkExpression(expression, visitor) {
