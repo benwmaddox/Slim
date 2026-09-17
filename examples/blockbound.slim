@@ -1,0 +1,676 @@
+// Blockbound is a warm, triangle-only courier run through a broken valley.
+// World coordinates use a 500 foot line, while the camera follows the fox.
+
+global player_x = 120;
+global player_y = 500;
+global player_vx = 0;
+global player_vy = 0;
+global player_ground = 1;
+global player_facing = 1;
+global player_pose = 0;
+global jump_hold = 0;
+global camera_x = 0;
+global state = 0;
+global walk_clock = 0;
+global progress_marks = 0;
+
+global enemy0_alive = 1;
+global enemy1_alive = 1;
+global enemy2_alive = 1;
+global enemy3_alive = 1;
+global enemy4_alive = 1;
+global enemy5_alive = 1;
+global enemy6_alive = 1;
+global enemy7_alive = 1;
+global enemy8_alive = 1;
+global enemy9_alive = 1;
+
+fn absolute(value) {
+  if (value < 0) {
+    return -value;
+  }
+  return value;
+}
+
+fn clamp(value, low, high) {
+  if (value < low) {
+    return low;
+  }
+  if (value > high) {
+    return high;
+  }
+  return value;
+}
+
+fn visible(left, right) {
+  if (right > camera_x - 40 && left < camera_x + 840) {
+    return 1;
+  }
+  return 0;
+}
+
+// Highest walkable top at a world x that the descending feet crossed.
+// -1000 marks a gap. The previous feet y keeps a raised block from making the
+// ground beneath it disappear when the fox is walking under that block.
+fn surface(x, previous) {
+  let top = -1000;
+  if (x >= 0 && x < 2200 && previous <= 500) {
+    top = 500;
+  }
+  if (x >= 2320 && x < 2820 && previous <= 500) {
+    top = 500;
+  }
+  if (x >= 2940 && x < 4420 && previous <= 500) {
+    top = 500;
+  }
+  if (x >= 4660 && x < 4900 && previous <= 500) {
+    top = 500;
+  }
+  if (x >= 5000 && x < 6800 && previous <= 500) {
+    top = 500;
+  }
+
+  if (x >= 420 && x < 540 && previous <= 350 && (top < -500 || top > 350)) {
+    top = 350;
+  }
+  if (x >= 700 && x < 764 && previous <= 436 && (top < -500 || top > 436)) {
+    top = 436;
+  }
+  if (x >= 1100 && x < 1180 && previous <= 404 && (top < -500 || top > 404)) {
+    top = 404;
+  }
+  if (x >= 1320 && x < 1450 && previous <= 360 && (top < -500 || top > 360)) {
+    top = 360;
+  }
+
+  if (x >= 1500 && x < 1580 && previous <= 372 && (top < -500 || top > 372)) {
+    top = 372;
+  }
+  if (x >= 1740 && x < 1820 && previous <= 372 && (top < -500 || top > 372)) {
+    top = 372;
+  }
+
+  if (x >= 2500 && x < 2640 && previous <= 350 && (top < -500 || top > 350)) {
+    top = 350;
+  }
+  if (x >= 3100 && x < 3260 && previous <= 320 && (top < -500 || top > 320)) {
+    top = 320;
+  }
+  if (x >= 3600 && x < 3750 && previous <= 360 && (top < -500 || top > 360)) {
+    top = 360;
+  }
+  if (x >= 3850 && x < 4000 && previous <= 280 && (top < -500 || top > 280)) {
+    top = 280;
+  }
+
+  if (x >= 4210 && x < 4280 && previous <= 468 && (top < -500 || top > 468)) {
+    top = 468;
+  }
+  if (x >= 4280 && x < 4350 && previous <= 436 && (top < -500 || top > 436)) {
+    top = 436;
+  }
+  if (x >= 4350 && x < 4420 && previous <= 404 && (top < -500 || top > 404)) {
+    top = 404;
+  }
+  if (x >= 4660 && x < 4730 && previous <= 468 && (top < -500 || top > 468)) {
+    top = 468;
+  }
+  if (x >= 4730 && x < 4800 && previous <= 436 && (top < -500 || top > 436)) {
+    top = 436;
+  }
+  if (x >= 4800 && x < 4870 && previous <= 404 && (top < -500 || top > 404)) {
+    top = 404;
+  }
+
+  if (x >= 5800 && x < 5880 && previous <= 468 && (top < -500 || top > 468)) {
+    top = 468;
+  }
+  if (x >= 5880 && x < 5960 && previous <= 430 && (top < -500 || top > 430)) {
+    top = 430;
+  }
+  if (x >= 5960 && x < 6040 && previous <= 392 && (top < -500 || top > 392)) {
+    top = 392;
+  }
+  if (x >= 6040 && x < 6120 && previous <= 354 && (top < -500 || top > 354)) {
+    top = 354;
+  }
+  if (x >= 6120 && x < 6200 && previous <= 316 && (top < -500 || top > 316)) {
+    top = 316;
+  }
+
+  return top;
+}
+
+fn rectangle(x, y, width, height, red, green, blue) {
+  tri(x - width / 2, y - height / 2, x + width / 2, y - height / 2, x + width / 2, y + height / 2, red, green, blue);
+  tri(x - width / 2, y - height / 2, x + width / 2, y + height / 2, x - width / 2, y + height / 2, red, green, blue);
+}
+
+fn ground_segment(left, right, top, red, green, blue) {
+  if (visible(left, right) == 1) {
+    let a = left - camera_x;
+    let b = right - camera_x;
+    tri(a, top, b, top, b, 600, red, green, blue);
+    tri(a, top, b, 600, a, 600, red, green, blue);
+    tri(a, top, b, top, b, top + 11, 0.98, 0.55, 0.16);
+    tri(a, top, b, top + 11, a, top + 11, 0.82, 0.31, 0.12);
+  }
+}
+
+fn platform(x, top, width) {
+  if (visible(x - width / 2, x + width / 2) == 1) {
+    let a = x - width / 2 - camera_x;
+    let b = x + width / 2 - camera_x;
+    tri(a, top, b, top, b, top + 26, 0.46, 0.18, 0.13);
+    tri(a, top, b, top + 26, a, top + 26, 0.32, 0.11, 0.12);
+    tri(a, top, b, top, b, top + 8, 0.98, 0.57, 0.18);
+    tri(a, top, b, top + 8, a, top + 8, 0.73, 0.27, 0.12);
+  }
+}
+
+fn pillar(x, top, width) {
+  if (visible(x - width / 2, x + width / 2) == 1) {
+    let a = x - width / 2 - camera_x;
+    let b = x + width / 2 - camera_x;
+    tri(a, top, b, top, b, 500, 0.47, 0.18, 0.13);
+    tri(a, top, b, 500, a, 500, 0.30, 0.10, 0.11);
+    tri(a, top, b, top, b, top + 9, 0.98, 0.55, 0.16);
+    tri(a, top, b, top + 9, a, top + 9, 0.76, 0.27, 0.12);
+  }
+}
+
+// Rectangles use the same world bounds for drawing and collision. A side hit
+// stops horizontal motion; a rising fox stops at the underside of a block.
+fn solid_rect(left, right, top, bottom, old_x, old_y) {
+  if (player_y > top + 2 && player_y - 82 < bottom) {
+    if (old_x <= left - 18 && player_x > left - 18) {
+      player_x = left - 18;
+      player_vx = 0;
+    }
+    if (old_x >= right + 18 && player_x < right + 18) {
+      player_x = right + 18;
+      player_vx = 0;
+    }
+  }
+  if (player_vy < 0 && player_x > left - 18 && player_x < right + 18 && old_y - 97 >= bottom && player_y - 97 < bottom) {
+    player_y = bottom + 97;
+    player_vy = 0;
+  }
+}
+
+fn solid_course(old_x, old_y) {
+  solid_rect(420, 540, 350, 376, old_x, old_y);
+  solid_rect(700, 764, 436, 500, old_x, old_y);
+  solid_rect(1100, 1180, 404, 500, old_x, old_y);
+  solid_rect(1320, 1450, 360, 386, old_x, old_y);
+  solid_rect(1500, 1580, 372, 500, old_x, old_y);
+  solid_rect(1740, 1820, 372, 500, old_x, old_y);
+  solid_rect(2500, 2640, 350, 376, old_x, old_y);
+  solid_rect(3100, 3260, 320, 346, old_x, old_y);
+  solid_rect(3600, 3750, 360, 386, old_x, old_y);
+  solid_rect(3850, 4000, 280, 306, old_x, old_y);
+  solid_rect(4210, 4280, 468, 500, old_x, old_y);
+  solid_rect(4280, 4350, 436, 500, old_x, old_y);
+  solid_rect(4350, 4420, 404, 500, old_x, old_y);
+  solid_rect(4660, 4730, 468, 500, old_x, old_y);
+  solid_rect(4730, 4800, 436, 500, old_x, old_y);
+  solid_rect(4800, 4870, 404, 500, old_x, old_y);
+  solid_rect(5800, 5880, 468, 500, old_x, old_y);
+  solid_rect(5880, 5960, 430, 500, old_x, old_y);
+  solid_rect(5960, 6040, 392, 500, old_x, old_y);
+  solid_rect(6040, 6120, 354, 500, old_x, old_y);
+  solid_rect(6120, 6200, 316, 500, old_x, old_y);
+}
+
+fn bush(x, y) {
+  if (visible(x - 45, x + 45) == 1) {
+    let sx = x - camera_x;
+    tri(sx - 42, y + 20, sx - 18, y - 28, sx + 8, y + 20, 0.16, 0.31, 0.18);
+    tri(sx - 12, y + 20, sx + 15, y - 42, sx + 42, y + 20, 0.20, 0.43, 0.20);
+    tri(sx - 19, y - 4, sx + 15, y - 42, sx + 22, y + 8, 0.38, 0.62, 0.24);
+  }
+}
+
+// The first coat triangle is the stable hero marker used by the replay probe.
+// Four parameters keep this renderer useful to small harnesses as well as the
+// game itself: world feet position, facing, and walking/air pose.
+fn hero(x, y, facing, pose) {
+  let sx = x - camera_x;
+  let step = pose % 2;
+  tri(sx - 17, y - 58, sx + 18, y - 54, sx + 3, y - 18, 0.95, 0.32, 0.1);
+  tri(sx - 17, y - 58, sx + 3, y - 18, sx - 16, y - 18, 0.64, 0.16, 0.08);
+  tri(sx - 14, y - 53, sx - 1, y - 52, sx - 8, y - 27, 0.82, 0.24, 0.08);
+  tri(sx - 1, y - 52, sx + 13, y - 48, sx + 3, y - 24, 0.56, 0.13, 0.07);
+  tri(sx - 8, y - 36, sx + 3, y - 44, sx + 6, y - 25, 0.98, 0.58, 0.16);
+  tri(sx - 15, y - 28, sx - 3, y - 29, sx - 7, y - 18, 0.42, 0.10, 0.06);
+  tri(sx + 3, y - 28, sx + 15, y - 30, sx + 9, y - 18, 0.36, 0.09, 0.06);
+  tri(sx - 18, y - 41, sx - 28, y - 37, sx - 18, y - 29, 0.98, 0.72, 0.29);
+  tri(sx + 15, y - 40, sx + 26, y - 36, sx + 16, y - 28, 0.98, 0.72, 0.29);
+  tri(sx - 16, y - 78, sx + 15, y - 78, sx + 18, y - 51, 0.96, 0.44, 0.12);
+  tri(sx - 14, y - 77, sx - 4, y - 97, sx + 1, y - 76, 0.78, 0.21, 0.08);
+  tri(sx + 2, y - 76, sx + 14, y - 97, sx + 18, y - 76, 0.78, 0.21, 0.08);
+  tri(sx - 9, y - 82, sx - 4, y - 91, sx - 1, y - 81, 0.17, 0.09, 0.08);
+  tri(sx + 6, y - 81, sx + 13, y - 91, sx + 15, y - 80, 0.17, 0.09, 0.08);
+  tri(sx + 5, y - 63, sx + 22, y - 57, sx + 11, y - 46, 1, 0.78, 0.42);
+  tri(sx + 11, y - 53, sx + 24, y - 49, sx + 12, y - 44, 0.25, 0.08, 0.04);
+  tri(sx - 3, y - 72, sx + 5, y - 68, sx + 2, y - 57, 0.98, 0.86, 0.48);
+  tri(sx + 3, y - 70, sx + 10, y - 68, sx + 7, y - 58, 0.76, 0.22, 0.08);
+  tri(sx - 17, y - 21, sx - 4, y - 24, sx - 4, y - 16, 0.77, 0.28, 0.10);
+  tri(sx + 4, y - 24, sx + 17, y - 21, sx + 4, y - 16, 0.62, 0.17, 0.08);
+  if (facing > 0) {
+    tri(sx - 15, y - 51, sx - 43, y - 35, sx - 18, y - 30, 0.87, 0.25, 0.08);
+    tri(sx - 41, y - 35, sx - 53, y - 25, sx - 18, y - 30, 0.52, 0.12, 0.07);
+  } else {
+    tri(sx + 17, y - 51, sx + 45, y - 35, sx + 18, y - 30, 0.87, 0.25, 0.08);
+    tri(sx + 43, y - 35, sx + 55, y - 25, sx + 18, y - 30, 0.52, 0.12, 0.07);
+  }
+  tri(sx - 17, y - 46, sx - 29, y - 32, sx - 16, y - 28, 0.96, 0.44, 0.12);
+  tri(sx + 15, y - 46, sx + 28, y - 32, sx + 16, y - 28, 0.96, 0.44, 0.12);
+  if (step == 0 || pose == 2) {
+    tri(sx - 13, y - 20, sx - 4, y - 20, sx - 10, y - 3, 0.29, 0.13, 0.12);
+    tri(sx + 4, y - 20, sx + 13, y - 20, sx + 9, y - 3, 0.29, 0.13, 0.12);
+  } else {
+    tri(sx - 14, y - 20, sx - 5, y - 20, sx - 16, y - 3, 0.29, 0.13, 0.12);
+    tri(sx + 5, y - 20, sx + 14, y - 20, sx + 18, y - 3, 0.29, 0.13, 0.12);
+  }
+  tri(sx - 15, y - 5, sx - 2, y - 5, sx - 14, y, 0.11, 0.09, 0.09);
+  tri(sx + 2, y - 5, sx + 15, y - 5, sx + 15, y, 0.11, 0.09, 0.09);
+}
+
+// Beetle enemies use a low, faceted shell and two angular legs per side.
+fn enemy_shape(x, y, pose) {
+  if (visible(x - 36, x + 36) == 1) {
+    let sx = x - camera_x;
+    let twitch = pose % 2;
+    tri(sx - 27, y - 22, sx, y - 46, sx + 27, y - 22, 0.48, 0.13, 0.10);
+    tri(sx - 27, y - 22, sx + 27, y - 22, sx, y - 4, 0.32, 0.08, 0.10);
+    tri(sx - 19, y - 23, sx, y - 41, sx - 2, y - 7, 0.77, 0.29, 0.12);
+    tri(sx + 19, y - 23, sx + 2, y - 7, sx, y - 41, 0.60, 0.16, 0.09);
+    tri(sx - 8, y - 40, sx + 8, y - 40, sx, y - 8, 0.92, 0.51, 0.13);
+    tri(sx - 21, y - 8, sx - 37, y + twitch - 1, sx - 16, y - 13, 0.19, 0.10, 0.10);
+    tri(sx + 21, y - 8, sx + 37, y + twitch - 1, sx + 16, y - 13, 0.19, 0.10, 0.10);
+    tri(sx - 16, y - 4, sx - 30, y + 8 + twitch, sx - 9, y - 8, 0.19, 0.10, 0.10);
+    tri(sx + 16, y - 4, sx + 30, y + 8 + twitch, sx + 9, y - 8, 0.19, 0.10, 0.10);
+    tri(sx - 8, y - 43, sx - 15, y - 57, sx - 4, y - 45, 0.30, 0.10, 0.08);
+    tri(sx + 8, y - 43, sx + 15, y - 57, sx + 4, y - 45, 0.30, 0.10, 0.08);
+    tri(sx - 14, y - 30, sx - 8, y - 35, sx - 4, y - 29, 0.96, 0.88, 0.42);
+    tri(sx + 4, y - 29, sx + 8, y - 35, sx + 14, y - 30, 0.96, 0.88, 0.42);
+  }
+}
+
+fn beacon() {
+  if (visible(6600, 6700) == 1) {
+    let sx = 6660 - camera_x;
+    tri(sx - 6, 300, sx + 6, 300, sx + 6, 500, 0.24, 0.16, 0.18);
+    tri(sx - 6, 300, sx + 6, 500, sx - 6, 500, 0.12, 0.09, 0.15);
+    tri(sx + 5, 308, sx + 72, 326, sx + 5, 344, 0.98, 0.76, 0.14);
+    tri(sx + 5, 308, sx + 5, 344, sx - 20, 326, 0.96, 0.36, 0.12);
+    tri(sx - 16, 284, sx, 266, sx + 16, 284, 0.98, 0.57, 0.16);
+  }
+}
+
+fn background() {
+  rectangle(400, 300, 800, 600, 0.98, 0.66, 0.36);
+  rectangle(400, 120, 800, 240, 0.98, 0.77, 0.48);
+  tri(0, 420, 190, 215, 385, 420, 0.83, 0.36, 0.24);
+  tri(240, 420, 480, 170, 720, 420, 0.78, 0.28, 0.24);
+  tri(560, 420, 735, 235, 920, 420, 0.88, 0.43, 0.24);
+  tri(0, 500, 230, 320, 470, 500, 0.51, 0.23, 0.22);
+  tri(390, 500, 600, 300, 830, 500, 0.46, 0.18, 0.21);
+  tri(675, 500, 790, 350, 900, 500, 0.57, 0.26, 0.22);
+  tri(680, 104, 708, 76, 736, 104, 1, 0.91, 0.55);
+  tri(694, 76, 722, 104, 694, 132, 0.99, 0.70, 0.30);
+}
+
+fn course() {
+  ground_segment(0, 2200, 500, 0.47, 0.18, 0.13);
+  ground_segment(2320, 2820, 500, 0.47, 0.18, 0.13);
+  ground_segment(2940, 4420, 500, 0.47, 0.18, 0.13);
+  ground_segment(4660, 4900, 500, 0.47, 0.18, 0.13);
+  ground_segment(5000, 6800, 500, 0.47, 0.18, 0.13);
+
+  platform(480, 350, 120);
+  pillar(732, 436, 64);
+  pillar(1140, 404, 80);
+  platform(1385, 360, 130);
+  pillar(1540, 372, 80);
+  pillar(1780, 372, 80);
+  platform(2570, 350, 140);
+  platform(3180, 320, 160);
+  platform(3675, 360, 150);
+  platform(3925, 280, 150);
+  pillar(4245, 468, 70);
+  pillar(4315, 436, 70);
+  pillar(4385, 404, 70);
+  pillar(4695, 468, 70);
+  pillar(4765, 436, 70);
+  pillar(4835, 404, 70);
+  pillar(5840, 468, 80);
+  pillar(5920, 430, 80);
+  pillar(6000, 392, 80);
+  pillar(6080, 354, 80);
+  pillar(6160, 316, 80);
+
+  bush(120, 476);
+  bush(720, 476);
+  bush(1500, 476);
+  bush(2300, 476);
+  bush(3100, 476);
+  bush(3980, 476);
+  bush(4900, 476);
+  bush(6000, 476);
+}
+
+fn enemies() {
+  if (enemy0_alive == 1) {
+    enemy_shape(550, 500, walk_clock);
+  }
+  if (enemy1_alive == 1) {
+    enemy_shape(1140, 404, walk_clock + 1);
+  }
+  if (enemy2_alive == 1) {
+    enemy_shape(1540, 372, walk_clock);
+  }
+  if (enemy3_alive == 1) {
+    enemy_shape(1780, 372, walk_clock + 1);
+  }
+  if (enemy4_alive == 1) {
+    enemy_shape(3400, 500, walk_clock);
+  }
+  if (enemy5_alive == 1) {
+    enemy_shape(4385, 404, walk_clock + 1);
+  }
+  if (enemy6_alive == 1) {
+    enemy_shape(4765, 436, walk_clock);
+  }
+  if (enemy7_alive == 1) {
+    enemy_shape(5400, 500, walk_clock + 1);
+  }
+  if (enemy8_alive == 1) {
+    enemy_shape(6000, 392, walk_clock);
+  }
+  if (enemy9_alive == 1) {
+    enemy_shape(6420, 500, walk_clock + 1);
+  }
+}
+
+fn hud() {
+  rectangle(400, 24, 760, 28, 0.18, 0.10, 0.16);
+  rectangle(150, 24, 250, 8, 0.39, 0.18, 0.16);
+  rectangle(150 + player_x * 250 / 6800, 24, player_x * 250 / 6800, 8, 0.98, 0.57, 0.16);
+  tri(30, 30, 48, 8, 66, 30, 0.98, 0.76, 0.20);
+  tri(30, 30, 66, 30, 48, 43, 0.93, 0.34, 0.15);
+  if (progress_marks > 0) {
+    tri(700, 30, 716, 8, 732, 30, 0.35, 0.82, 0.42);
+  }
+}
+
+fn terminal_win() {
+  rectangle(400, 300, 560, 170, 0.18, 0.10, 0.20);
+  tri(400, 180, 510, 380, 290, 380, 0.20, 0.95, 0.55);
+  tri(400, 225, 455, 330, 345, 330, 0.98, 0.86, 0.30);
+  tri(400, 410, 455, 455, 345, 455, 0.98, 0.76, 0.16);
+}
+
+fn terminal_loss() {
+  rectangle(400, 300, 560, 170, 0.18, 0.08, 0.14);
+  tri(300, 200, 340, 200, 500, 420, 0.95, 0.10, 0.20);
+  tri(500, 200, 460, 200, 300, 420, 0.95, 0.10, 0.20);
+  tri(400, 245, 440, 325, 360, 325, 0.99, 0.49, 0.16);
+}
+
+fn scene() {
+  background();
+  if (state == 0) {
+    course();
+    enemies();
+    beacon();
+    hero(player_x, player_y, player_facing, player_pose);
+    hud();
+  }
+  if (state == 1) {
+    terminal_win();
+  }
+  if (state == 2) {
+    terminal_loss();
+  }
+}
+
+fn reset_enemies() {
+  enemy0_alive = 1;
+  enemy1_alive = 1;
+  enemy2_alive = 1;
+  enemy3_alive = 1;
+  enemy4_alive = 1;
+  enemy5_alive = 1;
+  enemy6_alive = 1;
+  enemy7_alive = 1;
+  enemy8_alive = 1;
+  enemy9_alive = 1;
+}
+
+fn init() {
+  player_x = 120;
+  player_y = 500;
+  player_vx = 0;
+  player_vy = 0;
+  player_ground = 1;
+  player_facing = 1;
+  player_pose = 0;
+  jump_hold = 0;
+  camera_x = 0;
+  state = 0;
+  walk_clock = 0;
+  progress_marks = 0;
+  reset_enemies();
+}
+
+fn update_enemies() {
+  let before = player_y - player_vy;
+  if (enemy0_alive == 1 && absolute(player_x - 550) < 31 && absolute(player_y - (500 - 25)) < 29) {
+    if (player_vy > 0 && before < 464) {
+      enemy0_alive = 0;
+      player_vy = -8;
+      sound(1, 5, 0.18);
+    } else {
+      state = 2;
+      sound(2, -5, 0.22);
+    }
+  }
+  if (enemy1_alive == 1 && absolute(player_x - 1140) < 31 && absolute(player_y - (404 - 25)) < 29) {
+    if (player_vy > 0 && before < 368) {
+      enemy1_alive = 0;
+      player_vy = -8;
+      sound(1, 5, 0.18);
+    } else {
+      state = 2;
+      sound(2, -5, 0.22);
+    }
+  }
+  if (enemy2_alive == 1 && absolute(player_x - 1540) < 31 && absolute(player_y - (372 - 25)) < 29) {
+    if (player_vy > 0 && before < 336) {
+      enemy2_alive = 0;
+      player_vy = -8;
+      sound(1, 5, 0.18);
+    } else {
+      state = 2;
+      sound(2, -5, 0.22);
+    }
+  }
+  if (enemy3_alive == 1 && absolute(player_x - 1780) < 31 && absolute(player_y - (372 - 25)) < 29) {
+    if (player_vy > 0 && before < 336) {
+      enemy3_alive = 0;
+      player_vy = -8;
+      sound(1, 5, 0.18);
+    } else {
+      state = 2;
+      sound(2, -5, 0.22);
+    }
+  }
+  if (enemy4_alive == 1 && absolute(player_x - 3400) < 31 && absolute(player_y - (500 - 25)) < 29) {
+    if (player_vy > 0 && before < 464) {
+      enemy4_alive = 0;
+      player_vy = -8;
+      sound(1, 5, 0.18);
+    } else {
+      state = 2;
+      sound(2, -5, 0.22);
+    }
+  }
+  if (enemy5_alive == 1 && absolute(player_x - 4385) < 31 && absolute(player_y - (404 - 25)) < 29) {
+    if (player_vy > 0 && before < 368) {
+      enemy5_alive = 0;
+      player_vy = -8;
+      sound(1, 5, 0.18);
+    } else {
+      state = 2;
+      sound(2, -5, 0.22);
+    }
+  }
+  if (enemy6_alive == 1 && absolute(player_x - 4765) < 31 && absolute(player_y - (436 - 25)) < 29) {
+    if (player_vy > 0 && before < 400) {
+      enemy6_alive = 0;
+      player_vy = -8;
+      sound(1, 5, 0.18);
+    } else {
+      state = 2;
+      sound(2, -5, 0.22);
+    }
+  }
+  if (enemy7_alive == 1 && absolute(player_x - 5400) < 31 && absolute(player_y - (500 - 25)) < 29) {
+    if (player_vy > 0 && before < 464) {
+      enemy7_alive = 0;
+      player_vy = -8;
+      sound(1, 5, 0.18);
+    } else {
+      state = 2;
+      sound(2, -5, 0.22);
+    }
+  }
+  if (enemy8_alive == 1 && absolute(player_x - 6000) < 31 && absolute(player_y - (392 - 25)) < 29) {
+    if (player_vy > 0 && before < 356) {
+      enemy8_alive = 0;
+      player_vy = -8;
+      sound(1, 5, 0.18);
+    } else {
+      state = 2;
+      sound(2, -5, 0.22);
+    }
+  }
+  if (enemy9_alive == 1 && absolute(player_x - 6420) < 31 && absolute(player_y - (500 - 25)) < 29) {
+    if (player_vy > 0 && before < 464) {
+      enemy9_alive = 0;
+      player_vy = -8;
+      sound(1, 5, 0.18);
+    } else {
+      state = 2;
+      sound(2, -5, 0.22);
+    }
+  }
+}
+
+fn update_player() {
+  let direction = 0;
+  if (input(0) > 0) {
+    direction = direction - 1;
+  }
+  if (input(1) > 0) {
+    direction = direction + 1;
+  }
+  if (direction != 0) {
+    player_vx = player_vx + direction * 0.72;
+    player_facing = direction;
+  } else {
+    player_vx = player_vx * 0.78;
+  }
+  player_vx = clamp(player_vx, -6, 6);
+
+  if (input(5) > 0 && player_ground == 1) {
+    player_vy = -15;
+    player_ground = 0;
+    jump_hold = 8;
+    sound(0, 8, 0.08);
+  }
+  if (input(4) > 0 && player_vy < 0 && jump_hold > 0) {
+    player_vy = player_vy - 0.30;
+    jump_hold = jump_hold - 1;
+  } else {
+    jump_hold = 0;
+  }
+  player_vy = player_vy + 0.72;
+  player_vy = clamp(player_vy, -16, 15);
+
+  let old_x = player_x;
+  let old_y = player_y;
+  player_x = player_x + player_vx;
+  player_x = clamp(player_x, 18, 6770);
+  player_y = player_y + player_vy;
+  solid_course(old_x, old_y);
+  let top = surface(player_x, old_y);
+  if (player_vy >= 0 && top > -500 && old_y <= top && player_y >= top) {
+    player_y = top;
+    player_vy = 0;
+    player_ground = 1;
+  } else {
+    player_ground = 0;
+  }
+  if (player_y > 680) {
+    state = 2;
+    sound(2, -5, 0.22);
+  }
+
+  update_enemies();
+  if (player_x > 6620 && state == 0) {
+    state = 1;
+    progress_marks = 1;
+    sound(3, 12, 0.22);
+  }
+  if (player_x > 1000 && progress_marks == 0) {
+    progress_marks = 1;
+  }
+  if (player_x > 3300 && progress_marks == 1) {
+    progress_marks = 2;
+  }
+  if (player_x > 5200 && progress_marks == 2) {
+    progress_marks = 3;
+  }
+}
+
+fn update_camera() {
+  if (player_x - camera_x > 280) {
+    camera_x = player_x - 280;
+  }
+  if (camera_x < 0) {
+    camera_x = 0;
+  }
+  if (camera_x > 6000) {
+    camera_x = 6000;
+  }
+}
+
+fn update() {
+  walk_clock = walk_clock + 1;
+  if (walk_clock > 10000) {
+    walk_clock = 0;
+  }
+  update_player();
+  update_camera();
+  if (player_ground == 0) {
+    player_pose = 2;
+  } else if (absolute(player_vx) > 0.2) {
+    player_pose = walk_clock % 2;
+  } else {
+    player_pose = 0;
+  }
+}
+
+fn frame() {
+  if (input(9) > 0) {
+    init();
+  } else if (state == 0) {
+    update();
+  } else if (input(5) > 0) {
+    init();
+  }
+  scene();
+}

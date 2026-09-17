@@ -186,3 +186,42 @@ fn frame() { tri(x, 100, x + 20, 100, x, 120, 0.2, 0.7, 1); }
     await rm(directory, {recursive: true, force: true});
   }
 });
+
+test('keyboard-only build flag configures every host and preserves candidate counts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'slim-keyboard-build-'));
+  try {
+    const source = join(directory, 'keyboard game.slim');
+    const defaultOutput = join(directory, 'default');
+    const keyboardOutput = join(directory, 'keyboard');
+    await writeFile(source, `
+fn init() {}
+fn frame() { tri(input(0), 100, input(0) + 20, 100, input(0), 120, 0.2, 0.7, 1); }
+`);
+    runBuild(source, defaultOutput);
+    runBuild(source, keyboardOutput, ['--keyboard-only']);
+
+    const stem = 'keyboard-game';
+    const defaultReport = JSON.parse(await readFile(join(defaultOutput, `${stem}.size.json`), 'utf8'));
+    const keyboardReport = JSON.parse(await readFile(join(keyboardOutput, `${stem}.size.json`), 'utf8'));
+    assert.equal(defaultReport.keyboardOnly, false);
+    assert.equal(keyboardReport.keyboardOnly, true);
+    assert.deepEqual(Object.keys(keyboardReport.artifacts).sort(), Object.keys(defaultReport.artifacts).sort());
+    assert.deepEqual(keyboardReport.candidates.map((candidate) => candidate.id), defaultReport.candidates.map((candidate) => candidate.id));
+    assert.deepEqual((await readdir(keyboardOutput)).sort(), (await readdir(defaultOutput)).sort());
+
+    const defaultHtml = await readFile(join(defaultOutput, `${stem}.html`), 'utf8');
+    const defaultJsHtml = await readFile(join(defaultOutput, `${stem}.js.html`), 'utf8');
+    const keyboardHtml = await readFile(join(keyboardOutput, `${stem}.html`), 'utf8');
+    const keyboardJsHtml = await readFile(join(keyboardOutput, `${stem}.js.html`), 'utf8');
+    for (const page of [defaultHtml, defaultJsHtml]) {
+      assert.match(page, /pointerdown/);
+      assert.match(page, /Arrows\/WASD · Space · Mouse\/Touch · R restarts/);
+    }
+    for (const page of [keyboardHtml, keyboardJsHtml]) {
+      assert.doesNotMatch(page, /pointerdown|pointermove|pointerup|pointercancel|setPointerCapture|getBoundingClientRect/);
+      assert.match(page, /Arrows\/A-D: move · Space: jump · R: restart/);
+    }
+  } finally {
+    await rm(directory, {recursive: true, force: true});
+  }
+});

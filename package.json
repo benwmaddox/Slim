@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node tools/build.mjs examples/rainbow.slim",
+    "build:blockbound": "node tools/build.mjs examples/blockbound.slim --keyboard-only",
     "test": "node --test",
     "check": "node tools/build.mjs examples/rainbow.slim --check"
   },

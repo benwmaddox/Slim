@@ -94,17 +94,20 @@ async function bootPage(page, {audio = false, javascript = false} = {}) {
     page,
     imports: capturedImports,
     audioStats,
+    tick: () => frameCallback(1000 / 60),
+    globalEventTypes: () => [...globalHandlers.keys()],
+    canvasEventTypes: () => [...canvasHandlers.keys()],
     dispatchGlobal: (type, event) => dispatch(globalHandlers, type, event),
     dispatchCanvas: (type, event) => dispatch(canvasHandlers, type, event)
   };
 }
 
 async function boot(source, options = {}) {
-  return bootPage(makeHtml(compile(source), {title: 'host test'}), options);
+  return bootPage(makeHtml(compile(source), {title: 'host test', keyboardOnly: options.keyboardOnly}), options);
 }
 
 async function bootJavaScript(imports, options = {}) {
-  return bootPage(makeJavaScriptHtml(jsFactory, {title: 'host test', imports}), {...options, javascript: true});
+  return bootPage(makeJavaScriptHtml(jsFactory, {title: 'host test', imports, keyboardOnly: options.keyboardOnly}), {...options, javascript: true});
 }
 
 function keyboard(key, code = key, repeat = false) {
@@ -163,4 +166,58 @@ test('zero-gain sound does not construct audio or oscillator nodes', async () =>
     host.imports.e.sound(0, 0, 0.5);
     assert.deepEqual(host.audioStats, {contexts: 1, oscillators: 1});
   }
+});
+
+test('keyboard-only WASM and JavaScript hosts expose keyboard input without pointer state', async () => {
+  const hosts = [await boot(inputSource, {keyboardOnly: true}), await bootJavaScript(['input'], {keyboardOnly: true})];
+  for (const host of hosts) {
+    assert.equal(host.page.includes('pointerdown'), false);
+    assert.equal(host.page.includes('pointermove'), false);
+    assert.equal(host.page.includes('pointerup'), false);
+    assert.equal(host.page.includes('pointercancel'), false);
+    assert.equal(host.page.includes('setPointerCapture'), false);
+    assert.equal(host.page.includes('getBoundingClientRect'), false);
+    assert.equal(host.page.includes('Arrows/A-D: move · Space: jump · R: restart'), true);
+    assert.deepEqual(host.canvasEventTypes(), []);
+
+    host.dispatchGlobal('keydown', keyboard('ArrowLeft'));
+    assert.equal(host.imports.e.input(0), 1);
+    assert.equal(host.imports.e.input(5), 0);
+    assert.equal(host.imports.e.input(6), 0);
+    assert.equal(host.imports.e.input(7), 0);
+    assert.equal(host.imports.e.input(8), 0);
+
+    host.dispatchGlobal('keydown', keyboard(' ', 'Space'));
+    assert.equal(host.imports.e.input(4), 1);
+    assert.equal(host.imports.e.input(5), 1);
+    host.dispatchGlobal('keydown', keyboard(' ', 'Space', true));
+    assert.equal(host.imports.e.input(5), 1);
+    host.tick();
+    assert.equal(host.imports.e.input(5), 0);
+    host.dispatchGlobal('keydown', keyboard(' ', 'Space'));
+    assert.equal(host.imports.e.input(5), 1);
+
+    host.dispatchGlobal('keydown', keyboard('r'));
+    assert.equal(host.imports.e.input(9), 1);
+    host.dispatchGlobal('keydown', keyboard('r', 'r', true));
+    assert.equal(host.imports.e.input(9), 1);
+    host.dispatchGlobal('blur', {});
+    for (let index = 0; index <= 9; index += 1) assert.equal(host.imports.e.input(index), 0, `input(${index}) after blur`);
+  }
+});
+
+test('keyboard-only sound unlock listens for keydown without pointer unlock', async () => {
+  const hosts = [await boot(soundSource, {audio: true, keyboardOnly: true}), await bootJavaScript(['sound'], {audio: true, keyboardOnly: true})];
+  for (const host of hosts) {
+    assert.equal(host.page.includes('addEventListener("pointerdown",unlock)'), false);
+    assert.deepEqual(host.globalEventTypes(), ['keydown']);
+    host.dispatchGlobal('keydown', keyboard('ArrowLeft'));
+    assert.equal(host.audioStats.contexts, 1);
+  }
+});
+
+test('default host keeps pointer controls and the original footer', async () => {
+  const host = await boot(inputSource);
+  assert.equal(host.page.includes('Arrows/WASD · Space · Mouse/Touch · R restarts'), true);
+  assert.deepEqual(host.canvasEventTypes(), ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']);
 });

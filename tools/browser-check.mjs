@@ -204,6 +204,108 @@ const probeScript = `
 })();
 `;
 
+// Step the generated game's real RAF loop without depending on wall-clock timing.
+const clockScript = `(() => {
+  let now = 0, next = 0;
+  const callbacks = new Map();
+  Object.defineProperty(performance, 'now', {value: () => now});
+  window.requestAnimationFrame = callback => { callbacks.set(++next, callback); return next; };
+  window.cancelAnimationFrame = id => callbacks.delete(id);
+  window.__slimClock = {
+    ready: () => callbacks.size > 0,
+    step(ticks) {
+      for (let tick = 0; tick < ticks; tick++) {
+        now += 1000 / 60 + .000001;
+        const batch = [...callbacks.values()];
+        callbacks.clear();
+        for (const callback of batch) callback(now);
+      }
+    }
+  };
+})();`;
+
+async function platformerStats(page, colors) {
+  return page.evaluate(colors => {
+    const probe = window.__slimProbe;
+    const data = probe.buffers.at(-1) || [];
+    const markers = colors.map(color => {
+      for (let i = 0; i < data.length; i += 15) {
+        if (color.every((value, channel) => Math.abs(data[i + 2 + channel] - value) < .001)) {
+          return {x: (data[i] + data[i + 5] + data[i + 10]) / 3,
+            y: (data[i + 1] + data[i + 6] + data[i + 11]) / 3};
+        }
+      }
+      return null;
+    });
+    return {triangles: data.length / 15, finite: data.every(Number.isFinite), markers};
+  }, colors);
+}
+
+async function checkPlatformer(page, screenshot) {
+  const {winningReplay, heroColor, winColor, lossColor} = await import('./blockbound-replay.mjs');
+  const colors = [heroColor, winColor, lossColor];
+  const step = ticks => page.evaluate(ticks => window.__slimClock.step(ticks), ticks);
+  const stats = () => platformerStats(page, colors);
+  await page.waitForFunction(() => window.__slimClock?.ready(), undefined,
+    {timeout: timeoutMs, polling: 20});
+  await step(1);
+  const initial = await stats();
+  assertBrowser(initial.triangles > 0 && initial.finite && initial.markers[0], 'No finite platformer/player geometry');
+  const pixel = await pixelProbe(page);
+  assertBrowser(pixel.available && pixel.error === 0 && pixel.pixel.some(value => value !== 0), 'Platformer GPU pixel check failed');
+  await page.screenshot({path: screenshot, fullPage: true});
+  await page.keyboard.down('ArrowRight');
+  await step(10);
+  await page.keyboard.up('ArrowRight');
+  const moved = await stats();
+  assertBrowser(moved.markers[0]?.x > initial.markers[0].x + 10, 'Keyboard did not move the platformer player');
+  await page.keyboard.down('Space');
+  await step(5);
+  await page.keyboard.up('Space');
+  const jumped = await stats();
+  assertBrowser(jumped.markers[0]?.y < moved.markers[0].y - 10, 'Space did not jump');
+  await step(70);
+  const beforePointer = await stats();
+  await page.mouse.click(600, 250);
+  await step(5);
+  assertBrowser(Math.abs((await stats()).markers[0]?.x - beforePointer.markers[0]?.x) < .01, 'Pointer unexpectedly moved the keyboard-only player');
+  const restart = async () => {
+    await page.keyboard.down('r');
+    await step(1);
+    await page.keyboard.up('r');
+  };
+  await restart();
+  let maximumTriangles = initial.triangles;
+  let keys = new Set();
+  for (const [index, segment] of winningReplay.entries()) {
+    const desired = new Set(segment.keys);
+    for (const key of keys) if (!desired.has(key)) await page.keyboard.up(key);
+    for (const key of desired) if (!keys.has(key)) await page.keyboard.down(key);
+    keys = desired;
+    await step(segment.ticks);
+    const frame = await stats();
+    assertBrowser(frame.finite && frame.triangles > 0, 'Replay produced invalid geometry');
+    maximumTriangles = Math.max(maximumTriangles, frame.triangles);
+    if (index === Math.floor(winningReplay.length / 2)) {
+      await page.screenshot({path: screenshot.replace(/\.png$/, '-course.png'), fullPage: true});
+    }
+  }
+  for (const key of keys) await page.keyboard.up(key);
+  assertBrowser((await stats()).markers[1], 'Keyboard replay did not finish the course');
+  await page.screenshot({path: screenshot.replace(/\.png$/, '-win.png'), fullPage: true});
+  await restart();
+  assertBrowser((await stats()).markers[0] && !(await stats()).markers[1], 'R did not restart after winning');
+  await page.keyboard.down('ArrowRight');
+  await step(600);
+  await page.keyboard.up('ArrowRight');
+  assertBrowser((await stats()).markers[2], 'Walking into hazards did not produce a loss');
+  await restart();
+  assertBrowser((await stats()).markers[0] && !(await stats()).markers[2], 'R did not restart after losing');
+  return {initialTriangles: initial.triangles, maxObservedTriangles: maximumTriangles,
+    keyboardMovement: true, jump: true, pointerIgnored: true, courseCompleted: true,
+    lossAndRestart: true, screenshot};
+}
+
 async function frameStats(page) {
   return page.evaluate(() => {
     const p = window.__slimProbe;
@@ -266,7 +368,14 @@ async function runBrowser(name, playwright, url, screenshot) {
 
   try {
     await page.addInitScript({content: probeScript});
+    if (stem === 'blockbound') await page.addInitScript({content: clockScript});
     await page.goto(url, {waitUntil: 'load', timeout: timeoutMs});
+    if (stem === 'blockbound') {
+      const checks = await checkPlatformer(page, screenshot);
+      if (errors.length || failedRequests.length) fail([...errors, ...failedRequests].join('; '));
+      return {name, status: 'passed', version: browser.version(), executablePath, url,
+        audioContexts: await page.evaluate(() => window.__slimProbe.audioContexts), ...checks};
+    }
     await page.waitForFunction(() => window.__slimProbe?.buffers?.length > 0, undefined, {timeout: timeoutMs});
     const initial = await frameStats(page);
     assertBrowser(initial.triangles > 0, `${name} produced no triangle vertices`);

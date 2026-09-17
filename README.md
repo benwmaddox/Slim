@@ -51,6 +51,21 @@ layouts and selects the smallest complete ZIP. Set `SLIM_PYTHON` if Python uses
 a different command name. An explicitly configured optimizer failure aborts
 the build.
 
+## Second example: Blockbound
+
+```sh
+npm run build:blockbound
+```
+
+Blockbound is a keyboard-only side-scrolling platformer with original faceted
+characters and a course loosely inspired by an introductory platformer level.
+Use Left/Right or A/D to move, Space to jump, and R to restart. Its build keeps
+the same eight final files under the `blockbound` basename; Rainbow's outputs
+remain available. Open `dist/blockbound.js.html` or serve `blockbound.html`.
+
+`node tools/browser-check.mjs --source=blockbound` checks the generated JS and
+WASM with a repeatable keyboard route, jumping, loss/restart, and GPU output.
+
 ## Initial language
 
 ```text
@@ -75,6 +90,21 @@ constant initializers round at each f32 operation. `%` is implemented as
 and can lose precision for large quotients. No arrays,
 strings, allocation, classes, or modules yet. WASM is emitted directly; no C,
 Rust, LLVM, or language runtime is required to build a game.
+
+## WASM state storage experiment
+
+The default compiler keeps Slim globals as mutable WASM globals. For a fixed
+memory layout, use `compileDetailed(source, {globalStorage: 'memory'})`.
+`globalLayout` reports each name and its byte offset; slots are little-endian f32
+values, four bytes each, starting at zero in the exported memory. Initial values
+are present when the module is instantiated, before `init()` runs.
+
+`node tools/compare-state.mjs examples/rainbow.slim` compares both storage modes
+with identical minified hosts and archive names, including plain and Binaryen Oz
+variants when available. Add `--keyboard-only` for Blockbound. Experiment reports
+and selected WASM/WAT files go under `output/state-comparison`, keeping normal
+`dist` builds unchanged. This changes state storage only; triangle imports remain
+the same.
 
 ## Browser boundary
 

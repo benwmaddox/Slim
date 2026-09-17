@@ -34,6 +34,19 @@ ZIP of at most 13,312 bytes, including archive overhead.
 
 ## Subsequent slices, conditional on measurements
 
+### Side-scroller check: Blockbound
+
+- Original faceted characters, each at most 50 solid-color triangles.
+- Keyboard-only left/right, Space jump, R restart; no pointer gameplay code.
+- A scrolling course loosely follows the introductory platformer progression:
+  early blocks/enemy, rising obstacles, gaps, elevated platforms, stairs, finish.
+- Simple bounded movement and collision on the existing numeric language; no
+  compiler expansion or general physics engine.
+- Check standing, jumping, collision, scrolling, enemies, loss/restart, and a
+  complete deterministic keyboard route in JS and WASM.
+- Measure complete selected ZIPs against 13,312 bytes and inspect real Chrome
+  and Firefox output. Retain the eight final files for this source basename.
+
 1. Improve diagnostics and language ergonomics based on the sample.
 2. Compare triangle/input/sound shared-memory buffers with the direct-import
    baseline for package size and frame time.
@@ -42,8 +55,12 @@ ZIP of at most 13,312 bytes, including archive overhead.
    must preserve behavior and improve the final ZIP, not merely raw WASM size.
 
 The comparison slice emits native JS and exact-f32 JS through the same browser
-host, readable selected WAT, source-named artifacts, and Terser variants. Choose
+host, tool-generated WAT, source-named artifacts, and Terser variants. Choose
 packaging by complete ZIP size; preserve readable sources separately.
+
+The state-storage experiment translates Slim globals to fixed f32 memory slots
+and compares raw WASM and complete ZIPs with identical hosts and archive names.
+Both measured games favor mutable globals, which remain the production default.
 
 No general optimizer or complex compiler framework is planned for v0. Build
 dependencies do not ship. An existing compiler/runtime can be reused to create

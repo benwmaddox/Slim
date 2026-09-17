@@ -64,7 +64,59 @@ rainbow.f32.zip  C9AE94DC4E9FB50CAD483F7EF66F8517AFBABD25E16C9BECE84F69786C56702
 - Evidence: output/comparison-browser-check/summary.json and profile PNGs.
   Firefox automation requires host subprocess execution in this environment.
 
-## Limits
+## Blockbound prototype
+
+`examples/blockbound.slim` is a keyboard-only side-scroller with an original
+faceted fox and beetles. Its 6,800-unit course follows a familiar introductory
+platformer progression: early blocks, rising pillars, gaps, paired stairs, and a
+final beacon. This is an approximate course, with original triangle artwork.
+
+The fox emits 28 triangles in each tested pose and each beetle emits 13. Movement, variable-height
+jumps, terrain collision, stomping, camera tracking, terminal states, and restart
+are written in Slim. The keyboard-only host removes pointer handling.
+
+Current minified archives are 5,146 bytes for native JavaScript and 5,770 bytes for
+WASM with Binaryen Oz. The selected WASM is 13,539 bytes before ZIP compression.
+Focused tests cover actual shape poses and both wall and ceiling collisions,
+floor beneath floating blocks, stomping, falling, and restart. A 1,103-tick real
+keyboard replay reaches the beacon in WASM, memory-state WASM, native JS, and
+exact-f32 JS. The complete memory and exact-f32 draw/sound traces match default
+WASM; at most 117 scene triangles were observed.
+
+Chrome 152.0.7977.83 and Firefox 155.0 pass the generated WASM and native JS
+packages: GPU pixels, movement, jump, ignored pointer input, complete course,
+loss, and restart after both terminal states, with no browser errors. Initial,
+course, and win screenshots were inspected. Evidence is under
+`output/blockbound-browser-check`.
+
+## WASM state storage
+
+The optional `globalStorage: 'memory'` compiler mode translates every Slim global
+to a fixed little-endian f32 slot in exported linear memory. It uses active data
+for initial values and direct loads/stores; there is no allocator. Normal builds
+continue to use mutable WASM globals.
+
+| Source | Globals | Plain WASM, globals | Plain WASM, memory | Oz ZIP, globals | Oz ZIP, memory |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Rainbow | 21 | 4,251 B | 4,648 B | 3,608 B | 3,669 B |
+| Blockbound | 22 | 15,329 B | 15,915 B | 5,770 B | 5,854 B |
+
+Memory initializers need fewer bytes, but each access needs an address plus a
+load/store instead of a compact global get/set. The complete optimized ZIP
+comparison is recorded separately by `tools/compare-state.mjs` with identical
+hosts and archive entry names.
+
+For Blockbound, Oz emits 13,539 B with globals and 14,169 B with memory slots.
+The complete minified external-WASM ZIPs are 5,770 B and 5,854 B respectively.
+Globals save 84 B after compression and remain the production choice. The memory
+mode is retained only for comparison.
+Historical byte comparison against the preceding compiler confirms unchanged
+default output for both games. Tests cover manual slot writes from JavaScript,
+initial data, persistent mutation, local shadowing, f32 special values, and
+layouts extending beyond the first 64 KB page. WAT uses the disassembler's output
+without a readability pass.
+
+## Language and runtime limits
 
 No arrays, strings, heap, modules, or compound assignment. Function-scoped locals
 start at zero. Approximate f32 remainder is for small game values. Authored loops

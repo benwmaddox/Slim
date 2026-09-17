@@ -13,7 +13,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const budget = 13312;
 
 function usage() {
-  console.log('Usage: node tools/build.mjs [source.slim] [--out-dir DIR] [--check] [--compare-f32]');
+  console.log('Usage: node tools/build.mjs [source.slim] [--out-dir DIR] [--check] [--compare-f32] [--keyboard-only]');
 }
 
 function parseArgs(argv) {
@@ -21,6 +21,7 @@ function parseArgs(argv) {
   let outDir;
   let check = false;
   let compareF32 = false;
+  let keyboardOnly = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') {
@@ -33,6 +34,10 @@ function parseArgs(argv) {
     }
     if (argument === '--compare-f32') {
       compareF32 = true;
+      continue;
+    }
+    if (argument === '--keyboard-only') {
+      keyboardOnly = true;
       continue;
     }
     if (argument === '--out-dir' || argument.startsWith('--out-dir=')) {
@@ -54,6 +59,7 @@ function parseArgs(argv) {
     output: resolve(root, outDir || 'dist'),
     check,
     compareF32,
+    keyboardOnly,
   };
 }
 
@@ -219,6 +225,7 @@ async function buildInStaging(options, sourceText, staging) {
     for (const layout of ['embedded', 'external']) {
       const unminified = makeHtml(module.bytes, {
         title,
+        keyboardOnly: options.keyboardOnly,
         ...(layout === 'external' ? {wasmUrl: `${stem}.wasm`} : {}),
       });
       const variants = [
@@ -262,7 +269,11 @@ async function buildInStaging(options, sourceText, staging) {
     if (result.precision !== profile.precision) throw new Error(`JavaScript backend returned ${result.precision} for ${profile.precision}`);
     const codeArtifact = profile.name === 'js' ? `${stem}.js` : `${stem}.f32.js`;
     await writeFile(join(staging, codeArtifact), result.code);
-    const unminified = makeJavaScriptHtml(result.code, {title, imports: result.imports});
+    const unminified = makeJavaScriptHtml(result.code, {
+      title,
+      imports: result.imports,
+      keyboardOnly: options.keyboardOnly,
+    });
     const variants = [
       {suffix: '', html: unminified, minified: false},
       {suffix: '-min', html: await minifyHtml(unminified), minified: true},
@@ -333,6 +344,7 @@ async function buildInStaging(options, sourceText, staging) {
     source: basename(options.source),
     stem,
     title,
+    keyboardOnly: options.keyboardOnly,
     budget,
     selected: bestWasm.id,
     selectedWasm: candidateSummary({...bestWasm, reportArchive: `${stem}.zip`}),

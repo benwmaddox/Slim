@@ -167,14 +167,44 @@ function sound(i, p, g) {
 
 // Pointer coordinates stay available after release; input(8) reports the
 // pointer's current primary-button state so keyboard control cannot teleport.
-function inputHost(gesture = '') {
-  return `
-var held = [0, 0, 0, 0, 0], pressed = 0, restart = 0, px = 0, py = 0, ph = 0;
+function inputHost(gesture = '', keyboardOnly = false) {
+  const pointerState = keyboardOnly ? '' : ', px = 0, py = 0, ph = 0';
+  const jumpInput = keyboardOnly ? 'held[4]' : 'held[4] || ph';
+  const pointerInputs = keyboardOnly
+    ? `
+    case 6:
+    case 7:
+    case 8: return 0;`
+    : `
+    case 6: return px;
+    case 7: return py;
+    case 8: return ph;`;
+  const pointerListeners = keyboardOnly ? '' : `
 function point(e) {
   var r = c.getBoundingClientRect();
   px = Math.max(0, Math.min(800, (e.clientX - r.left) * 800 / r.width));
   py = Math.max(0, Math.min(600, (e.clientY - r.top) * 600 / r.height));
 }
+`;
+  const pointerEvents = keyboardOnly ? '' : `
+c.addEventListener('pointerdown', function (e) {
+  point(e);
+  if (e.button === 0) { ph = 1; pressed = 1; }
+  try { c.setPointerCapture(e.pointerId); } catch (x) {}
+  ${gesture}
+});
+c.addEventListener('pointermove', point);
+c.addEventListener('pointerup', function (e) {
+  point(e);
+  if (e.button === 0) ph = 0;
+});
+c.addEventListener('pointercancel', function (e) {
+  point(e);
+  ph = 0;
+});`;
+  return `
+var held = [0, 0, 0, 0, 0], pressed = 0, restart = 0${pointerState};
+${pointerListeners}
 function key(e, on) {
   var k = e.key.toLowerCase();
   var i = k === 'arrowleft' || k === 'a' ? 0 : k === 'arrowright' || k === 'd' ? 1 : k === 'arrowup' || k === 'w' ? 2 : k === 'arrowdown' || k === 's' ? 3 : k === ' ' || e.code === 'Space' ? 4 : -1;
@@ -191,11 +221,9 @@ function input(i) {
     case 1: return held[1];
     case 2: return held[2];
     case 3: return held[3];
-    case 4: return held[4] || ph;
+    case 4: return ${jumpInput};
     case 5: return pressed;
-    case 6: return px;
-    case 7: return py;
-    case 8: return ph;
+${pointerInputs}
     case 9: return restart;
     default: return 0;
   }
@@ -203,31 +231,17 @@ function input(i) {
 addEventListener('keydown', function (e) { key(e, 1); });
 addEventListener('keyup', function (e) { key(e, 0); });
 addEventListener('blur', function () {
-  held[0] = held[1] = held[2] = held[3] = held[4] = ph = 0;
+  held[0] = held[1] = held[2] = held[3] = held[4]${keyboardOnly ? '' : ' = ph'} = 0;
   pressed = restart = 0;
 });
-c.addEventListener('pointerdown', function (e) {
-  point(e);
-  if (e.button === 0) { ph = 1; pressed = 1; }
-  try { c.setPointerCapture(e.pointerId); } catch (x) {}
-  ${gesture}
-});
-c.addEventListener('pointermove', point);
-c.addEventListener('pointerup', function (e) {
-  point(e);
-  if (e.button === 0) ph = 0;
-});
-c.addEventListener('pointercancel', function (e) {
-  point(e);
-  ph = 0;
-});`;
+${pointerEvents}`;
 }
 
-function makeRuntime({ used, modules, boot }) {
+function makeRuntime({ used, modules, boot, keyboardOnly = false }) {
   const pieces = [];
   if (used.has('tri')) pieces.push(triangleHost());
   if (used.has('sound')) pieces.push(soundHost());
-  if (used.has('input')) pieces.push(inputHost(used.has('sound') ? 'unlock()' : ''));
+  if (used.has('input')) pieces.push(inputHost(used.has('sound') ? 'unlock()' : '', keyboardOnly));
 
   const imports = [];
   for (const module of modules) imports.push(`I[${JSON.stringify(module)}]=E`);
@@ -239,7 +253,9 @@ function makeRuntime({ used, modules, boot }) {
   const draw = used.has('tri') ? 'draw()' : '';
   const clear = used.has('tri') ? 'v.length=0;' : '';
   const inputTick = used.has('input') ? 'pressed=restart=0;' : '';
-  const audioUnlock = used.has('sound') ? 'addEventListener("keydown",unlock);addEventListener("pointerdown",unlock)' : '';
+  const audioUnlock = used.has('sound')
+    ? keyboardOnly ? 'addEventListener("keydown",unlock)' : 'addEventListener("keydown",unlock);addEventListener("pointerdown",unlock)'
+    : '';
 
   return `(function () {
   var c = document.querySelector('canvas');
@@ -274,7 +290,7 @@ function makeRuntime({ used, modules, boot }) {
 
 /**
  * @param {ArrayBuffer|ArrayBufferView} wasmBytes
- * @param {{title?: string, wasmUrl?: string}} [options]
+ * @param {{title?: string, wasmUrl?: string, keyboardOnly?: boolean}} [options]
  * `wasmUrl` selects an external fetch layout; otherwise the module is embedded.
  * Sound pitch uses semitone offsets from 220 Hz and gain 0..1, where zero is silent.
  * @returns {string} a complete, self-contained HTML document
@@ -283,28 +299,31 @@ export function makeHtml(wasmBytes, options = {}) {
   const bytes = bytesOf(wasmBytes);
   const { used, modules } = scanImports(bytes);
   const title = html(options.title);
+  const keyboardOnly = options.keyboardOnly === true;
   const boot = options.wasmUrl == null
     ? `var z=atob('${base64(bytes)}'),w=new Uint8Array(z.length),j=0;for(;j<z.length;j++)w[j]=z.charCodeAt(j);WebAssembly.instantiate(w,I).then(function(x){return x.instance.exports})`
     : `fetch(${JSON.stringify(options.wasmUrl).replace(/</g, '\\u003c')}).then(function(r){if(!r.ok)throw Error('WASM '+r.status);return r.arrayBuffer()}).then(function(w){return WebAssembly.instantiate(w,I)}).then(function(x){return x.instance.exports})`;
-  const runtime = makeRuntime({ used, modules, boot });
-  return page(title, runtime);
+  const runtime = makeRuntime({ used, modules, boot, keyboardOnly });
+  return page(title, runtime, keyboardOnly);
 }
 
-function page(title, runtime) {
-  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href="data:,"><title>${title}</title><style>html,body{margin:0;width:100%;height:100%;background:#111;color:#fff;font:14px system-ui}main{height:100%;display:grid;place-items:center;align-content:center;gap:4px;text-align:center}canvas{display:block;width:min(100vw,calc((100vh - 24px)*4/3));height:auto;aspect-ratio:4/3;touch-action:none}p{margin:0;opacity:.7}</style><main><canvas width=800 height=600></canvas><p>Arrows/WASD · Space · Mouse/Touch · R restarts</p></main><script>${runtime}</script>`;
+function page(title, runtime, keyboardOnly = false) {
+  const footer = keyboardOnly ? 'Arrows/A-D: move · Space: jump · R: restart' : 'Arrows/WASD · Space · Mouse/Touch · R restarts';
+  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href="data:,"><title>${title}</title><style>html,body{margin:0;width:100%;height:100%;background:#111;color:#fff;font:14px system-ui}main{height:100%;display:grid;place-items:center;align-content:center;gap:4px;text-align:center}canvas{display:block;width:min(100vw,calc((100vh - 24px)*4/3));height:auto;aspect-ratio:4/3;touch-action:none}p{margin:0;opacity:.7}</style><main><canvas width=800 height=600></canvas><p>${footer}</p></main><script>${runtime}</script>`;
 }
 
 /**
  * @param {string} code a factory expression accepting the host object `e`
- * @param {{title?: string, imports?: Iterable<string>|Record<string, boolean>}} [options]
+ * @param {{title?: string, imports?: Iterable<string>|Record<string, boolean>, keyboardOnly?: boolean}} [options]
  * @returns {string} a complete, self-contained HTML document
  */
 export function makeJavaScriptHtml(code, options = {}) {
   if (typeof code !== 'string' || !code.trim()) throw new TypeError('JavaScript game code must be a factory expression');
   const { used, modules } = scanJavaScriptImports(options.imports);
   const title = html(options.title);
+  const keyboardOnly = options.keyboardOnly === true;
   const boot = `Promise.resolve((${code})(E))`;
-  return page(title, makeRuntime({ used, modules, boot }));
+  return page(title, makeRuntime({ used, modules, boot, keyboardOnly }), keyboardOnly);
 }
 
 export default makeHtml;

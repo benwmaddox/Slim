@@ -655,6 +655,29 @@ function u32(value) {
   return bytes;
 }
 
+// Signed LEB128 is required for i32.const immediates.  In particular, the
+// one-byte encoding 0x40 means -64 when decoded as a signed value, so using
+// u32() for a memory address at that boundary silently points at the wrong
+// slot.
+function s32(value) {
+  if (!Number.isInteger(value) || value < -0x80000000 || value > 0x7fffffff) {
+    throw new Error(`internal error: invalid signed LEB128 value ${value}`);
+  }
+  const bytes = [];
+  let remaining = value;
+  let done = false;
+  while (!done) {
+    let byte = remaining % 128;
+    if (byte < 0) byte += 128;
+    remaining = (remaining - byte) / 128;
+    const signBit = byte & 0x40;
+    done = (remaining === 0 && signBit === 0) || (remaining === -1 && signBit !== 0);
+    if (!done) byte |= 0x80;
+    bytes.push(byte);
+  }
+  return bytes;
+}
+
 function stringBytes(value) {
   const bytes = Array.from(new TextEncoder().encode(value));
   return [...u32(bytes.length), ...bytes];
@@ -674,13 +697,16 @@ function typeKey(params) {
   return `${params}=>1`;
 }
 
-function emitModule(program) {
+function emitModule(program, options = {}) {
+  const globalStorage = options.globalStorage ?? "globals";
   const globals = program.globals.map((global) => ({
     name: global.name,
     value: evalConstant(global.expression),
   }));
   const globalIndices = new Map(globals.map((global, index) => [global.name, index]));
   const globalNames = new Set(globalIndices.keys());
+  const globalLayout = globals.map((global, index) => ({name: global.name, offset: index * 4}));
+  const globalOffsets = new Map(globalLayout.map((global) => [global.name, global.offset]));
 
   const reachability = prepareReachability(program);
   const importedNames = reachability.importedBuiltins;
@@ -728,11 +754,29 @@ function emitModule(program) {
   }
 
   const globalsSection = [];
-  for (const global of globals) {
-    // v0 globals are mutable so the game can keep compact state in the module
-    // without introducing a heap or a separate state ABI.
-    globalsSection.push(F32, 0x01, 0x43, ...f32Bytes(global.value), 0x0b);
+  if (globalStorage === "globals") {
+    for (const global of globals) {
+      // v0 globals are mutable so the game can keep compact state in the module
+      // without introducing a heap or a separate state ABI.
+      globalsSection.push(F32, 0x01, 0x43, ...f32Bytes(global.value), 0x0b);
+    }
   }
+
+  // Keep the address itself on the stack for the common small-offset case.
+  // For larger offsets, an i32.const 0 plus a memarg offset can be shorter.
+  // Both forms use natural f32 alignment (2) and offset zero in the direct
+  // form so the emitted layout is easy to inspect in WAT.
+  const memoryAccess = (opcode, offset) => {
+    const direct = [0x41, ...s32(offset), opcode, 0x02, 0x00];
+    const memarg = [0x41, 0x00, opcode, 0x02, ...u32(offset)];
+    return direct.length <= memarg.length ? direct : memarg;
+  };
+
+  const memoryStore = (offset, value) => {
+    const direct = [0x41, ...s32(offset), ...value, 0x38, 0x02, 0x00];
+    const memarg = [0x41, 0x00, ...value, 0x38, 0x02, ...u32(offset)];
+    return direct.length <= memarg.length ? direct : memarg;
+  };
 
   const contextFor = (fn) => ({
     fn,
@@ -758,7 +802,11 @@ function emitModule(program) {
           }
           const globalIndex = context.globalIndices.get(node.name);
           if (globalIndex !== undefined) {
-            append(0x23, ...u32(globalIndex));
+            if (globalStorage === "globals") {
+              append(0x23, ...u32(globalIndex));
+            } else {
+              append(...memoryAccess(0x2a, globalOffsets.get(node.name)));
+            }
             return;
           }
           compileError(`unknown value ${JSON.stringify(node.name)}`, node.token);
@@ -877,7 +925,11 @@ function emitModule(program) {
           if (globalIndex === undefined) {
             compileError(`unknown local or global ${JSON.stringify(statement.name)}`, statement.token);
           }
-          append(...emitExpr(statement.expression, context), 0x24, ...u32(globalIndex));
+          if (globalStorage === "globals") {
+            append(...emitExpr(statement.expression, context), 0x24, ...u32(globalIndex));
+          } else {
+            append(...memoryStore(globalOffsets.get(statement.name), emitExpr(statement.expression, context)));
+          }
           break;
         }
         case "expr":
@@ -930,7 +982,10 @@ function emitModule(program) {
     ...types.flatMap((params) => [0x60, ...u32(params), ...Array(params).fill(F32), 1, F32]),
   ];
   const importPayload = [...u32(importedNames.length), ...imports];
-  const memoryPayload = [1, 0x00, 1];
+  const memoryPages = globalStorage === "memory"
+    ? Math.max(1, Math.ceil((globals.length * 4) / 65536))
+    : 1;
+  const memoryPayload = [1, 0x00, ...u32(memoryPages)];
   const exportPayload = [
     3,
     ...stringBytes("init"), 0x00, ...u32(functionIndices.get("init")),
@@ -949,9 +1004,15 @@ function emitModule(program) {
       ...functionSection,
     ]),
     ...section(5, memoryPayload),
-    ...(globals.length ? section(6, [...u32(globals.length), ...globalsSection]) : []),
+    ...(globalStorage === "globals" && globals.length ? section(6, [...u32(globals.length), ...globalsSection]) : []),
     ...section(7, exportPayload),
     ...section(10, codePayload),
+    ...(globalStorage === "memory" && globals.length ? section(11, [
+      1,
+      0x00, 0x41, 0x00, 0x0b,
+      ...u32(globals.length * 4),
+      ...globals.flatMap((global) => f32Bytes(global.value)),
+    ]) : []),
   ];
 
   return {
@@ -959,12 +1020,14 @@ function emitModule(program) {
     imports: importedNames.slice(),
     functions: reachability.reachable.map((fn) => fn.name),
     globals: globals.map((global) => global.name),
+    globalStorage,
+    ...(globalStorage === "memory" ? {globalLayout} : {}),
   };
 }
 
 /** Compile Slim source into a standalone WebAssembly binary. */
-export function compile(source) {
-  return compileDetailed(source).wasm;
+export function compile(source, options = {}) {
+  return compileDetailed(source, options).wasm;
 }
 
 /**
@@ -983,12 +1046,24 @@ export function parseProgram(source) {
  * Compile Slim source and return the binary plus small build-time metadata.
  * Metadata is intentionally not encoded into the WebAssembly module.
  */
-export function compileDetailed(source) {
+export function compileDetailed(source, options = {}) {
   if (typeof source !== "string") {
     throw new TypeError("Slim compile error: source must be a string");
   }
+  if (options === null || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("Slim compile error: options must be an object");
+  }
+  const optionNames = Object.keys(options);
+  const unsupported = optionNames.find((name) => name !== "globalStorage");
+  if (unsupported) {
+    throw new TypeError(`Slim compile error: unsupported option ${JSON.stringify(unsupported)}`);
+  }
+  const globalStorage = options.globalStorage ?? "globals";
+  if (globalStorage !== "globals" && globalStorage !== "memory") {
+    throw new TypeError(`Slim compile error: globalStorage must be "globals" or "memory", got ${JSON.stringify(globalStorage)}`);
+  }
   const program = parseProgram(source);
-  return emitModule(program);
+  return emitModule(program, {globalStorage});
 }
 
 export default compile;
