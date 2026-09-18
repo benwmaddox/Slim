@@ -1,0 +1,375 @@
+// Critters: a small procedural-animal simulation.
+//
+// Each animal is a chain of points.  The head wanders, then every following
+// point is pulled back to a fixed distance from its predecessor.  The small
+// component clamp in each follow loop limits per-frame displacement.
+// It smooths following, rather than enforcing an exact bend-angle constraint.  Overlapping triangle discs make
+// the body read as a continuous, soft shape without a sprite sheet.
+
+const INPUT_ACTION_PRESSED = 5;
+const INPUT_RESTART = 9;
+const MODE_SNAKE = 0;
+const MODE_LIZARD = 1;
+const MODE_BEETLE = 2;
+const SNAKE_COUNT = 7;
+const LIZARD_COUNT = 6;
+const BEETLE_COUNT = 5;
+
+global clock = 0;
+global mode = MODE_SNAKE;
+
+global snake_x = [280, 256, 232, 208, 184, 160, 136];
+global snake_y = [190, 195, 200, 205, 210, 215, 220];
+global lizard_x = [400, 370, 340, 310, 280, 250];
+global lizard_y = [410, 414, 418, 422, 426, 430];
+global beetle_x = [650, 626, 602, 578, 554];
+global beetle_y = [500, 502, 504, 506, 508];
+
+fn absolute(value) {
+  if (value < 0) {
+    return -value;
+  }
+  return value;
+}
+
+fn clamp(value, low, high) {
+  if (value < low) {
+    return low;
+  }
+  if (value > high) {
+    return high;
+  }
+  return value;
+}
+
+// A triangle wave is enough to make the creatures meander without a trig
+// library.  It is also deterministic, so a replay sees the same motion.
+fn wave(value, period) {
+  let position = value % period;
+  if (position < 0) {
+    position = position + period;
+  }
+  if (position < period / 2) {
+    return position / (period / 2);
+  }
+  return (period - position) / (period / 2);
+}
+
+fn rectangle(x, y, width, height, r, g, b) {
+  tri(x, y, x + width, y, x + width, y + height, r, g, b);
+  tri(x, y, x + width, y + height, x, y + height, r, g, b);
+}
+
+// Four wedges are a compact circle approximation.  Adjacent discs overlap,
+// so a chain looks like one continuous animal instead of separate sprites.
+fn disc(x, y, radius, r, g, b) {
+  tri(x, y, x + radius, y, x, y - radius, r, g, b);
+  tri(x, y, x, y - radius, x - radius, y, r, g, b);
+  tri(x, y, x - radius, y, x, y + radius, r, g, b);
+  tri(x, y, x, y + radius, x + radius, y, r, g, b);
+}
+
+// A thick link made from two triangles.  Manhattan normalization is smaller
+// than sqrt and is sufficient for this low-poly display.
+fn bar(x1, y1, x2, y2, width, r, g, b) {
+  let dx = x2 - x1;
+  let dy = y2 - y1;
+  let scale = absolute(dx) + absolute(dy) + 1;
+  let px = -dy * width / scale;
+  let py = dx * width / scale;
+  tri(x1 + px, y1 + py, x2 + px, y2 + py, x2 - px, y2 - py, r, g, b);
+  tri(x1 + px, y1 + py, x2 - px, y2 - py, x1 - px, y1 - py, r, g, b);
+}
+
+fn reset_snake() {
+  snake_x[0] = 280;
+  snake_x[1] = 256;
+  snake_x[2] = 232;
+  snake_x[3] = 208;
+  snake_x[4] = 184;
+  snake_x[5] = 160;
+  snake_x[6] = 136;
+  snake_y[0] = 190;
+  snake_y[1] = 195;
+  snake_y[2] = 200;
+  snake_y[3] = 205;
+  snake_y[4] = 210;
+  snake_y[5] = 215;
+  snake_y[6] = 220;
+}
+
+fn reset_lizard() {
+  lizard_x[0] = 400;
+  lizard_x[1] = 370;
+  lizard_x[2] = 340;
+  lizard_x[3] = 310;
+  lizard_x[4] = 280;
+  lizard_x[5] = 250;
+  lizard_y[0] = 410;
+  lizard_y[1] = 414;
+  lizard_y[2] = 418;
+  lizard_y[3] = 422;
+  lizard_y[4] = 426;
+  lizard_y[5] = 430;
+}
+
+fn reset_beetle() {
+  beetle_x[0] = 650;
+  beetle_x[1] = 626;
+  beetle_x[2] = 602;
+  beetle_x[3] = 578;
+  beetle_x[4] = 554;
+  beetle_y[0] = 500;
+  beetle_y[1] = 502;
+  beetle_y[2] = 504;
+  beetle_y[3] = 506;
+  beetle_y[4] = 508;
+}
+
+fn reset_all() {
+  clock = 0;
+  mode = MODE_SNAKE;
+  reset_snake();
+  reset_lizard();
+  reset_beetle();
+}
+
+fn follow_snake() {
+  let i = 1;
+  while (i < SNAKE_COUNT) {
+    let dx = snake_x[i - 1] - snake_x[i];
+    let dy = snake_y[i - 1] - snake_y[i];
+    let length = absolute(dx) + absolute(dy) + 1;
+    let target_x = snake_x[i - 1] - dx * 24 / length;
+    let target_y = snake_y[i - 1] - dy * 24 / length;
+    let move_x = clamp(target_x - snake_x[i], -7, 7);
+    let move_y = clamp(target_y - snake_y[i], -7, 7);
+    snake_x[i] = snake_x[i] + move_x;
+    snake_y[i] = snake_y[i] + move_y;
+    i = i + 1;
+  }
+}
+
+fn follow_lizard() {
+  let i = 1;
+  while (i < LIZARD_COUNT) {
+    let dx = lizard_x[i - 1] - lizard_x[i];
+    let dy = lizard_y[i - 1] - lizard_y[i];
+    let length = absolute(dx) + absolute(dy) + 1;
+    let target_x = lizard_x[i - 1] - dx * 30 / length;
+    let target_y = lizard_y[i - 1] - dy * 30 / length;
+    let move_x = clamp(target_x - lizard_x[i], -8, 8);
+    let move_y = clamp(target_y - lizard_y[i], -8, 8);
+    lizard_x[i] = lizard_x[i] + move_x;
+    lizard_y[i] = lizard_y[i] + move_y;
+    i = i + 1;
+  }
+}
+
+fn follow_beetle() {
+  let i = 1;
+  while (i < BEETLE_COUNT) {
+    let dx = beetle_x[i - 1] - beetle_x[i];
+    let dy = beetle_y[i - 1] - beetle_y[i];
+    let length = absolute(dx) + absolute(dy) + 1;
+    let target_x = beetle_x[i - 1] - dx * 24 / length;
+    let target_y = beetle_y[i - 1] - dy * 24 / length;
+    let move_x = clamp(target_x - beetle_x[i], -8, 8);
+    let move_y = clamp(target_y - beetle_y[i], -8, 8);
+    beetle_x[i] = beetle_x[i] + move_x;
+    beetle_y[i] = beetle_y[i] + move_y;
+    i = i + 1;
+  }
+}
+
+fn update_snake() {
+  snake_x[0] = clamp(snake_x[0] + (wave(clock + 17, 170) - .5) * 2.4, 62, 738);
+  snake_y[0] = clamp(snake_y[0] + (wave(clock + 43, 113) - .5) * 2.1, 112, 290);
+  follow_snake();
+}
+
+fn update_lizard() {
+  lizard_x[0] = clamp(lizard_x[0] + (wave(clock + 61, 211) - .5) * 2.8, 70, 730);
+  lizard_y[0] = clamp(lizard_y[0] + (wave(clock + 9, 139) - .5) * 1.6, 340, 470);
+  follow_lizard();
+}
+
+fn update_beetle() {
+  beetle_x[0] = clamp(beetle_x[0] + (wave(clock + 101, 149) - .5) * 3.1, 74, 726);
+  beetle_y[0] = clamp(beetle_y[0] + (wave(clock + 27, 97) - .5) * 1.4, 488, 548);
+  follow_beetle();
+}
+
+// Local drawing frame follows the head-to-neck heading without trigonometry.
+global pose_x = 0;
+global pose_y = 0;
+global pose_dx = 1;
+global pose_dy = 0;
+
+fn heading(x, y, neck_x, neck_y) {
+  pose_x = x;
+  pose_y = y;
+  let dx = x - neck_x;
+  let dy = y - neck_y;
+  let length = absolute(dx) + absolute(dy);
+  if (length < 1) {
+    dx = 1;
+    dy = 0;
+    length = 1;
+  }
+  pose_dx = dx / length;
+  pose_dy = dy / length;
+}
+
+fn local_tri(ax, ay, bx, by, cx, cy, r, g, b) {
+  tri(pose_x + ax * pose_dx - ay * pose_dy, pose_y + ax * pose_dy + ay * pose_dx,
+      pose_x + bx * pose_dx - by * pose_dy, pose_y + bx * pose_dy + by * pose_dx,
+      pose_x + cx * pose_dx - cy * pose_dy, pose_y + cx * pose_dy + cy * pose_dx, r, g, b);
+}
+
+fn eyes() {
+  local_tri(7, -13, 15, -8, 5, -5, 1, .92, .65);
+  local_tri(7, 13, 5, 5, 15, 8, 1, .92, .65);
+  local_tri(10, -10, 13, -8, 9, -6, .04, .05, .08);
+  local_tri(10, 10, 9, 6, 13, 8, .04, .05, .08);
+}
+
+// 44 triangles: broad overlapping links, tapered tail, directional eyes.
+fn snake_scene() {
+  let i = SNAKE_COUNT - 1;
+  while (i >= 0) {
+    let radius = 22 - i * 2.7;
+    if (i > 0) {
+      bar(snake_x[i - 1], snake_y[i - 1], snake_x[i], snake_y[i], radius, .68, .19, .22);
+    }
+    disc(snake_x[i], snake_y[i], radius, .9 - i * .045, .27 - i * .012, .25);
+    i = i - 1;
+  }
+  heading(snake_x[0], snake_y[0], snake_x[1], snake_y[1]);
+  eyes();
+}
+
+// Bent, splayed legs alternate diagonal pairs. Two triangles per limb segment.
+fn lizard_leg(x, y, neck_x, neck_y, side, phase) {
+  heading(x, y, neck_x, neck_y);
+  let step = (wave(clock + phase, 48) - .5) * 16;
+  local_tri(5, side * 9, step - 9, side * 29, step - 16, side * 25, .12, .37, .22);
+  local_tri(5, side * 9, step - 16, side * 25, -7, side * 10, .12, .37, .22);
+  local_tri(step - 9, side * 29, step + 7, side * 41, step + 12, side * 36, .49, .77, .32);
+  local_tri(step - 9, side * 29, step + 12, side * 36, step - 16, side * 25, .3, .61, .28);
+}
+
+// 42 triangles: four limbs, two broad torso nodes, a fine tail and wedge head.
+fn lizard_scene() {
+  lizard_leg(lizard_x[1], lizard_y[1], lizard_x[2], lizard_y[2], -1, 0);
+  lizard_leg(lizard_x[1], lizard_y[1], lizard_x[2], lizard_y[2], 1, 24);
+  lizard_leg(lizard_x[2], lizard_y[2], lizard_x[3], lizard_y[3], -1, 24);
+  lizard_leg(lizard_x[2], lizard_y[2], lizard_x[3], lizard_y[3], 1, 0);
+  let i = LIZARD_COUNT - 1;
+  while (i > 0) {
+    let radius = 22;
+    if (i > 2) {
+      radius = 22 - (i - 2) * 6.5;
+    }
+    bar(lizard_x[i - 1], lizard_y[i - 1], lizard_x[i], lizard_y[i], radius, .26, .61, .29);
+    if (i < 3) {
+      disc(lizard_x[i], lizard_y[i], 24, .4, .72, .32);
+    }
+    i = i - 1;
+  }
+  heading(lizard_x[0], lizard_y[0], lizard_x[1], lizard_y[1]);
+  local_tri(-16, -13, 10, -17, 24, 0, .54, .81, .35);
+  local_tri(-16, -13, 24, 0, -16, 13, .4, .71, .29);
+  local_tri(-16, 13, 24, 0, 10, 17, .25, .55, .26);
+  local_tri(-16, -3, 16, 0, -16, 3, .79, .88, .43);
+  eyes();
+}
+
+fn beetle_leg(station, side, phase) {
+  let step = (wave(clock + phase, 37) - .5) * 14;
+  local_tri(station, side * 16, station + step - 10, side * 33, station + step - 14, side * 29, .33, .43, .65);
+  local_tri(station, side * 16, station + step - 14, side * 29, station - 5, side * 16, .33, .43, .65);
+  local_tri(station + step - 10, side * 33, station + step - 1, side * 44, station + step + 3, side * 40, .61, .69, .83);
+  local_tri(station + step - 10, side * 33, station + step + 3, side * 40, station + step - 14, side * 29, .33, .43, .65);
+}
+
+// 42 triangles: six alternating tripod legs and a single armored shell.
+fn beetle_scene() {
+  heading(beetle_x[0], beetle_y[0], beetle_x[1], beetle_y[1]);
+  let i = 0;
+  while (i < 3) {
+    beetle_leg(-8 - i * 16, -1, i * 18);
+    beetle_leg(-8 - i * 16, 1, i * 18 + 18);
+    i = i + 1;
+  }
+  local_tri(7, -9, 23, -24, 19, -12, .62, .73, .91);
+  local_tri(7, 9, 19, 12, 23, 24, .62, .73, .91);
+  local_tri(-8, 0, -21, -27, -43, -24, .3, .51, .86);
+  local_tri(-8, 0, -43, -24, -57, 0, .2, .35, .66);
+  local_tri(-8, 0, -57, 0, -43, 24, .12, .22, .46);
+  local_tri(-8, 0, -43, 24, -21, 27, .17, .3, .58);
+  local_tri(-8, 0, -21, 27, 0, 15, .23, .4, .7);
+  local_tri(-8, 0, 0, -15, -21, -27, .4, .63, .95);
+  local_tri(-55, 0, -6, -2, -6, 2, .07, .12, .25);
+  local_tri(-40, -18, -21, -21, -28, -14, .66, .82, 1);
+  local_tri(-5, -15, 13, -12, 20, 0, .14, .24, .4);
+  local_tri(-5, -15, 20, 0, -5, 15, .18, .29, .48);
+  local_tri(-5, 15, 20, 0, 13, 12, .1, .17, .32);
+  local_tri(-5, -15, -11, 0, -5, 15, .25, .4, .62);
+  eyes();
+}
+
+fn background() {
+  rectangle(0, 0, 800, 600, .025, .035, .08);
+  rectangle(0, 300, 800, 300, .03, .05, .12);
+  rectangle(0, 565, 800, 35, .08, .12, .09);
+  tri(0, 565, 170, 470, 340, 565, .08, .16, .1);
+  tri(220, 565, 410, 440, 600, 565, .07, .14, .09);
+  tri(510, 565, 680, 455, 850, 565, .08, .15, .1);
+  disc(80, 80, 3, .7, .8, .95);
+  disc(280, 125, 2, .7, .8, .95);
+  disc(540, 75, 3, .7, .8, .95);
+  disc(730, 145, 2, .7, .8, .95);
+}
+
+fn selector() {
+  // Space cycles which creature gets the bright marker; all three keep moving.
+  if (mode == MODE_SNAKE) {
+    tri(snake_x[0], snake_y[0] - 35, snake_x[0] - 8, snake_y[0] - 48, snake_x[0] + 8, snake_y[0] - 48, 1, .9, .2);
+  }
+  if (mode == MODE_LIZARD) {
+    tri(lizard_x[0], lizard_y[0] - 39, lizard_x[0] - 8, lizard_y[0] - 52, lizard_x[0] + 8, lizard_y[0] - 52, 1, .9, .2);
+  }
+  if (mode == MODE_BEETLE) {
+    tri(beetle_x[0], beetle_y[0] - 34, beetle_x[0] - 8, beetle_y[0] - 47, beetle_x[0] + 8, beetle_y[0] - 47, 1, .9, .2);
+  }
+}
+
+fn init() {
+  reset_all();
+}
+
+fn update() {
+  clock = clock + 1;
+  if (input(INPUT_RESTART) > 0) {
+    reset_all();
+  }
+  if (input(INPUT_ACTION_PRESSED) > 0) {
+    mode = mode + 1;
+    if (mode > MODE_BEETLE) {
+      mode = MODE_SNAKE;
+    }
+  }
+  update_snake();
+  update_lizard();
+  update_beetle();
+}
+
+fn frame() {
+  update();
+  background();
+  snake_scene();
+  lizard_scene();
+  beetle_scene();
+  selector();
+}

@@ -478,7 +478,7 @@ function makeRuntime({ used, modules, boot, keyboardOnly = false, soundPacking =
 
 /**
  * @param {ArrayBuffer|ArrayBufferView} wasmBytes
- * @param {{title?: string, wasmUrl?: string, keyboardOnly?: boolean, soundPacking?: 'none'|'numbers'|'bytes'}} [options]
+ * @param {{title?: string, wasmUrl?: string, keyboardOnly?: boolean, soundPacking?: 'none'|'numbers'|'bytes', footer?: string}} [options]
  * `wasmUrl` selects an external fetch layout; otherwise the module is embedded.
  * Sound pitch uses semitone offsets from 220 Hz and gain 0..1, where zero is silent.
  * @returns {string} a complete, self-contained HTML document
@@ -493,17 +493,17 @@ export function makeHtml(wasmBytes, options = {}) {
     ? `var z=atob('${base64(bytes)}'),w=new Uint8Array(z.length),j=0;for(;j<z.length;j++)w[j]=z.charCodeAt(j);WebAssembly.instantiate(w,I).then(function(x){return x.instance.exports})`
     : `fetch(${JSON.stringify(options.wasmUrl).replace(/</g, '\\u003c')}).then(function(r){if(!r.ok)throw Error('WASM '+r.status);return r.arrayBuffer()}).then(function(w){return WebAssembly.instantiate(w,I)}).then(function(x){return x.instance.exports})`;
   const runtime = makeRuntime({ used, modules, boot, keyboardOnly, soundPacking });
-  return page(title, runtime, keyboardOnly);
+  return page(title, runtime, keyboardOnly, options.footer);
 }
 
-function page(title, runtime, keyboardOnly = false) {
-  const footer = keyboardOnly ? 'Arrows/A-D: move · Space: jump · R: restart' : 'Arrows/WASD · Space · Mouse/Touch · R restarts';
-  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href="data:,"><title>${title}</title><style>html,body{margin:0;width:100%;height:100%;background:#111;color:#fff;font:14px system-ui}main{height:100%;display:grid;place-items:center;align-content:center;gap:4px;text-align:center}canvas{display:block;width:min(100vw,calc((100vh - 24px)*4/3));height:auto;aspect-ratio:4/3;touch-action:none}p{margin:0;opacity:.7}</style><main><canvas width=800 height=600></canvas><p>${footer}</p></main><script>${runtime}</script>`;
+function page(title, runtime, keyboardOnly = false, footerText) {
+  const footer = footerText ?? (keyboardOnly ? 'Arrows/A-D: move · Space: jump · R: restart' : 'Arrows/WASD · Space · Mouse/Touch · R restarts');
+  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href="data:,"><title>${title}</title><style>html,body{margin:0;width:100%;height:100%;background:#111;color:#fff;font:14px system-ui}main{height:100%;display:grid;place-items:center;align-content:center;gap:4px;text-align:center}canvas{display:block;width:min(100vw,calc((100vh - 24px)*4/3));height:auto;aspect-ratio:4/3;touch-action:none}p{margin:0;opacity:.7}</style><main><canvas width=800 height=600></canvas><p>${html(footer)}</p></main><script>${runtime}</script>`;
 }
 
 /**
  * @param {string} code a factory expression accepting the host object `e`
- * @param {{title?: string, imports?: Iterable<string>|Record<string, boolean>, keyboardOnly?: boolean, soundPacking?: 'none'|'numbers'|'bytes'}} [options]
+ * @param {{title?: string, imports?: Iterable<string>|Record<string, boolean>, keyboardOnly?: boolean, soundPacking?: 'none'|'numbers'|'bytes', footer?: string}} [options]
  * @returns {string} a complete, self-contained HTML document
  */
 export function makeJavaScriptHtml(code, options = {}) {
@@ -513,7 +513,7 @@ export function makeJavaScriptHtml(code, options = {}) {
   const title = html(options.title);
   const keyboardOnly = options.keyboardOnly === true;
   const boot = `Promise.resolve((${code})(E))`;
-  return page(title, makeRuntime({ used, modules, boot, keyboardOnly, soundPacking }), keyboardOnly);
+  return page(title, makeRuntime({ used, modules, boot, keyboardOnly, soundPacking }), keyboardOnly, options.footer);
 }
 
 export default makeHtml;

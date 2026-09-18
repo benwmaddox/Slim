@@ -111,6 +111,21 @@ the `shardbound` basename.
 Serve
 `dist/shardbound.html` or open `dist/shardbound.js.html` for the native JS version.
 
+## Procedural animals example
+
+```sh
+npm run build:critters
+```
+
+Critters is a small procedural-animation simulation inspired by Argonaut’s
+chain technique. Three autonomous animals use fixed arrays of joints: a snake,
+a lizard with alternating legs, and a beetle with a six-leg gait. Each link
+follows its predecessor toward a target distance using compact Manhattan
+normalization; overlapping triangle discs and bars form the silhouettes. Space
+cycles the highlighted animal and R resets the deterministic walk. The source
+is [examples/critters.slim](examples/critters.slim), and the release output is
+written as the usual source-named files under `dist/`.
+
 ## Initial language
 
 ```text

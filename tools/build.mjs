@@ -289,6 +289,7 @@ function finalArchiveFor(candidate, stem, bestWasm, bestJs, bestF32) {
 
 async function finishBuild({options, sourceText, staging, stem, title, python, zipTool, optimizer, records, skippedCandidates, searchStages}) {
   const select = (items) => items.slice().sort(candidateCompare)[0];
+  const footer = stem === 'critters' ? 'Space: select animal · R: restart' : undefined;
   const profiles = [{name: 'js', precision: 'native'}];
   if (options.compareF32) profiles.push({name: 'f32', precision: 'f32'});
   for (const profile of profiles) {
@@ -301,6 +302,7 @@ async function finishBuild({options, sourceText, staging, stem, title, python, z
         imports: result.imports,
         keyboardOnly: options.keyboardOnly,
         soundPacking,
+        footer,
       });
       const htmlVariants = [
         {suffix: '', html: unminified, minified: false},
@@ -454,6 +456,7 @@ async function main() {
 async function buildInStagingStaged(options, sourceText, staging) {
   const stem = safeStem(options.source);
   const title = titleFor(stem);
+  const footer = stem === 'critters' ? 'Space: select animal · R: restart' : undefined;
   const python = process.env.SLIM_PYTHON || 'python';
   const zipTool = resolve(root, 'tools/zip.py');
   const records = [];
@@ -658,6 +661,7 @@ async function buildInStagingStaged(options, sourceText, staging) {
       title,
       keyboardOnly: options.keyboardOnly,
       soundPacking,
+      footer,
       ...(settings.layout === 'external' ? {wasmUrl: `${stem}.wasm`} : {}),
     });
     const htmlVariants = [
@@ -787,6 +791,7 @@ async function buildInStagingStaged(options, sourceText, staging) {
 async function buildInStaging(options, sourceText, staging) {
   const stem = safeStem(options.source);
   const title = titleFor(stem);
+  const footer = stem === 'critters' ? 'Space: select animal · R: restart' : undefined;
   const python = process.env.SLIM_PYTHON || 'python';
   const zipTool = resolve(root, 'tools/zip.py');
   const records = [];
@@ -911,6 +916,7 @@ async function buildInStaging(options, sourceText, staging) {
               title,
               keyboardOnly: options.keyboardOnly,
               soundPacking,
+              footer,
               ...(layout === 'external' ? {wasmUrl: `${stem}.wasm`} : {}),
             });
             const variants = [
