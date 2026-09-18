@@ -8,6 +8,7 @@
     "build:blockbound": "node tools/build.mjs examples/blockbound.slim --keyboard-only",
     "build:shardbound": "node tools/build.mjs examples/shardbound.slim --keyboard-only --release --pack-triangles ATLAS",
     "build:critters": "node tools/build.mjs examples/critters.slim --keyboard-only --release",
+    "export:svg": "node tools/export-svg.mjs examples/critters.slim --out dist/critters.svg --gzip",
     "build:release": "node tools/build.mjs examples/rainbow.slim --release",
     "test": "node --test",
     "check": "node tools/build.mjs examples/rainbow.slim --check"

@@ -7,12 +7,16 @@
  * represented as f32 0/1 values so game code can use them in arithmetic too.
  */
 
-const BUILTIN_ORDER = ["tri", "sound", "input"];
+const SVG_METADATA_BUILTIN = "svg_group";
+const SVG_TRI_BUILTIN = "svg_tri";
+const BUILTIN_ORDER = ["tri", "sound", "input", SVG_METADATA_BUILTIN, SVG_TRI_BUILTIN];
 
 const BUILTINS = Object.freeze({
   tri: Object.freeze({ params: 9, result: true }),
   sound: Object.freeze({ params: 3, result: true }),
   input: Object.freeze({ params: 1, result: true }),
+  [SVG_METADATA_BUILTIN]: Object.freeze({ params: 1, result: true }),
+  [SVG_TRI_BUILTIN]: Object.freeze({ params: 10, result: true }),
 });
 
 const F32 = 0x7d;
@@ -962,7 +966,31 @@ function walkStatement(statement, visitor) {
   }
 }
 
-function prepareReachability(program) {
+function collectSvgTriCallSites(program) {
+  const ids = new Map();
+  const descriptors = [];
+  let nextId = 1;
+  for (const fn of program.functions.values()) {
+    for (const statement of fn.body) {
+      walkStatement(statement, (node) => {
+        if (node.kind !== "call" || node.name !== "tri" || ids.has(node)) return;
+        const id = nextId;
+        nextId += 1;
+        ids.set(node, id);
+        descriptors.push({
+          id,
+          function: fn.name,
+          line: node.token?.line ?? 0,
+          column: node.token?.column ?? 0,
+        });
+      });
+    }
+  }
+  return {ids, descriptors};
+}
+
+function prepareReachability(program, options = {}) {
+  const svgMetadata = options.svgMetadata === true;
   const functions = new Map(program.functions);
   for (const root of ["init", "frame"]) {
     if (!functions.has(root)) {
@@ -991,9 +1019,14 @@ function prepareReachability(program) {
         if (node.kind !== "call") return;
         const builtin = Object.hasOwn(BUILTINS, node.name) ? BUILTINS[node.name] : undefined;
         if (builtin) {
-          builtinNames.add(node.name);
           if (node.args.length !== builtin.params) {
             compileError(`builtin ${JSON.stringify(node.name)} expects ${builtin.params} arguments, got ${node.args.length}`, node.token);
+          }
+          if ((node.name === SVG_METADATA_BUILTIN || node.name === SVG_TRI_BUILTIN) && !svgMetadata) return;
+          if (node.name === "tri" && svgMetadata) {
+            builtinNames.add(SVG_TRI_BUILTIN);
+          } else {
+            builtinNames.add(node.name);
           }
           return;
         }
@@ -1284,6 +1317,8 @@ function emitModule(program, options = {}) {
   const globalStorage = options.globalStorage ?? "globals";
   const packedTriangleNames = options.packedTriangleArrays ?? [];
   const integerArrayStorage = options.integerArrayStorage ?? "f32";
+  const svgMetadata = options.svgMetadata === true;
+  const svgTriCallSites = svgMetadata ? collectSvgTriCallSites(program) : {ids: new Map(), descriptors: []};
   const globals = program.globals.map((global) => ({
     name: global.name,
     value: evalConstant(global.expression),
@@ -1293,7 +1328,7 @@ function emitModule(program, options = {}) {
   const globalLayout = globals.map((global, index) => ({name: global.name, offset: index * 4}));
   const globalOffsets = new Map(globalLayout.map((global) => [global.name, global.offset]));
 
-  const reachability = prepareReachability(program);
+  const reachability = prepareReachability(program, {svgMetadata});
   const importedNames = reachability.importedBuiltins;
 
   const arrayByName = new Map(program.arrays.map((array) => [array.name, array]));
@@ -1436,6 +1471,7 @@ function emitModule(program, options = {}) {
     functionIndices,
     packedDecoderIndices,
     importedNames,
+    svgTriCallSites: svgTriCallSites.ids,
   });
 
   const emitExpr = (expression, context) => {
@@ -1471,6 +1507,24 @@ function emitModule(program, options = {}) {
           append(...emitArrayRead(node, context));
           return;
         case "call": {
+          if ((node.name === SVG_METADATA_BUILTIN || node.name === SVG_TRI_BUILTIN) && !svgMetadata) {
+            append(0x43, ...f32Bytes(0));
+            return;
+          }
+          if (node.name === "tri" && svgMetadata) {
+            const callSiteId = context.svgTriCallSites.get(node);
+            if (callSiteId === undefined) {
+              compileError("internal error: missing SVG triangle call-site identity", node.token);
+            }
+            append(0x43, ...f32Bytes(callSiteId));
+            for (const argument of node.args) emit(argument);
+            const svgTriIndex = context.importedNames.indexOf(SVG_TRI_BUILTIN);
+            if (svgTriIndex < 0) {
+              compileError("internal error: missing SVG triangle metadata import", node.token);
+            }
+            append(0x10, ...u32(svgTriIndex));
+            return;
+          }
           const functionIndex = context.functionIndices.get(node.name);
           const builtinIndex = context.importedNames.indexOf(node.name);
           if (functionIndex === undefined && builtinIndex < 0) {
@@ -1667,6 +1721,9 @@ function emitModule(program, options = {}) {
   const emitStatements = (statements, context) => {
     const code = [];
     const append = (...bytes) => code.push(...bytes);
+    const isStrippedSvgMetadata = (expression) => !svgMetadata
+      && expression.kind === "call"
+      && (expression.name === SVG_METADATA_BUILTIN || expression.name === SVG_TRI_BUILTIN);
     for (const statement of statements) {
       switch (statement.kind) {
         case "let": {
@@ -1706,6 +1763,7 @@ function emitModule(program, options = {}) {
           break;
         }
         case "expr":
+          if (isStrippedSvgMetadata(statement.expression)) break;
           append(...emitExpr(statement.expression, context), 0x1a);
           break;
         case "return":
@@ -1869,6 +1927,8 @@ function emitModule(program, options = {}) {
     globals: globals.map((global) => global.name),
     globalStorage,
     integerArrayStorage,
+    svgMetadata,
+    svgTriCallSites: svgTriCallSites.descriptors,
     arrays: arrayLayout,
     arrayLayout,
     memoryPages,
@@ -1909,7 +1969,7 @@ export function compileDetailed(source, options = {}) {
   }
   const optionNames = Object.keys(options);
   const unsupported = optionNames.find((name) => (
-    name !== "globalStorage" && name !== "packedTriangleArrays" && name !== "integerArrayStorage"
+    name !== "globalStorage" && name !== "packedTriangleArrays" && name !== "integerArrayStorage" && name !== "svgMetadata"
   ));
   if (unsupported) {
     throw new TypeError(`Slim compile error: unsupported option ${JSON.stringify(unsupported)}`);
@@ -1923,6 +1983,10 @@ export function compileDetailed(source, options = {}) {
     : options.integerArrayStorage;
   if (integerArrayStorage !== "f32" && integerArrayStorage !== "compact") {
     throw new TypeError(`Slim compile error: integerArrayStorage must be "f32" or "compact", got ${JSON.stringify(integerArrayStorage)}`);
+  }
+  const svgMetadata = options.svgMetadata ?? false;
+  if (typeof svgMetadata !== "boolean") {
+    throw new TypeError(`Slim compile error: svgMetadata must be true or false, got ${JSON.stringify(svgMetadata)}`);
   }
   const packedTriangleArrays = options.packedTriangleArrays === undefined
     ? []
@@ -1945,6 +2009,7 @@ export function compileDetailed(source, options = {}) {
     globalStorage,
     integerArrayStorage,
     packedTriangleArrays: [...packedNames],
+    svgMetadata,
   });
 }
 

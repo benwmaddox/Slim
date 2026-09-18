@@ -126,6 +126,68 @@ cycles the highlighted animal and R resets the deterministic walk. The source
 is [examples/critters.slim](examples/critters.slim), and the release output is
 written as the usual source-named files under `dist/`.
 
+### Blog SVG replay
+
+The same deterministic triangle stream can be exported as a standalone,
+animated SVG for a short blog replay:
+
+```sh
+npm run export:svg
+```
+
+This writes `dist/critters.svg` and an optional `dist/critters.svg.gz`. The
+exporter samples the WASM game, leaves static triangles as ordinary polygons,
+factors pure translations into compact SVG/SMIL `animateTransform` elements,
+aligns conditional draw calls by their export-only call-site identity, and uses
+`points` animations for deforming triangle slots. The default is four
+seconds at eight samples per second with two-pixel coordinate quantization;
+increase `--quantize` for a smaller file or lower it for smoother geometry:
+
+```sh
+node tools/export-svg.mjs examples/critters.slim --out dist/critters.svg \
+  --seconds 6 --fps 12 --quantize 1 --gzip
+```
+
+Games can mark contiguous draw calls with an export-only group marker:
+
+```slim
+svg_group(12);
+draw_body();
+svg_group(0);
+```
+
+The SVG exporter records those markers and, when the triangles move as one
+rigid part, emits a shared translate/rotate/scale animation for the group.
+Deforming groups automatically fall back to per-triangle animation. Normal
+compiles and release builds strip `svg_group` calls completely, so the marker
+does not add a runtime import or release bytes. In a loop, include the instance
+index in the marker (for example, `svg_group(100 + i)`) so objects that enter
+or leave the viewport keep their own animation slot. Visibility changes use
+discrete opacity, which keeps a new object from interpolating out of the
+placeholder origin.
+
+For games that need interaction to show useful motion, pass a JSON input
+schedule with one frame per sample. Each frame can be an array or a sparse
+object keyed by Slim input index; omitted values are zero:
+
+```json
+[{}, {"4": 1}, {}, {"2": 1}]
+```
+
+```sh
+node tools/export-svg.mjs examples/game.slim --inputs replay.json --gzip
+```
+
+The SVG is self-contained and can be embedded with an ordinary blog image
+element. It does not need the Slim runtime, WASM, JavaScript, or a video
+player. Ungrouped and deforming triangles remain frame-faithful; marked rigid
+groups use shared transforms so their repeated motion is compact. For a blog
+post, the embedding can stay as simple as:
+
+```html
+<img src="critters.svg" alt="Animated low-poly critters">
+```
+
 ## Initial language
 
 ```text

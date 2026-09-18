@@ -11,6 +11,9 @@ const INPUT_RESTART = 9;
 const MODE_SNAKE = 0;
 const MODE_LIZARD = 1;
 const MODE_BEETLE = 2;
+const SVG_GROUP_SNAKE_HEAD = 101;
+const SVG_GROUP_LIZARD_HEAD = 102;
+const SVG_GROUP_BEETLE_SHELL = 103;
 const SNAKE_COUNT = 7;
 const LIZARD_COUNT = 6;
 const BEETLE_COUNT = 5;
@@ -246,7 +249,9 @@ fn snake_scene() {
     i = i - 1;
   }
   heading(snake_x[0], snake_y[0], snake_x[1], snake_y[1]);
+  svg_group(SVG_GROUP_SNAKE_HEAD);
   eyes();
+  svg_group(0);
 }
 
 // Bent, splayed legs alternate diagonal pairs. Two triangles per limb segment.
@@ -282,7 +287,9 @@ fn lizard_scene() {
   local_tri(-16, -13, 24, 0, -16, 13, .4, .71, .29);
   local_tri(-16, 13, 24, 0, 10, 17, .25, .55, .26);
   local_tri(-16, -3, 16, 0, -16, 3, .79, .88, .43);
+  svg_group(SVG_GROUP_LIZARD_HEAD);
   eyes();
+  svg_group(0);
 }
 
 fn beetle_leg(station, side, phase) {
@@ -302,6 +309,7 @@ fn beetle_scene() {
     beetle_leg(-8 - i * 16, 1, i * 18 + 18);
     i = i + 1;
   }
+  svg_group(SVG_GROUP_BEETLE_SHELL);
   local_tri(7, -9, 23, -24, 19, -12, .62, .73, .91);
   local_tri(7, 9, 19, 12, 23, 24, .62, .73, .91);
   local_tri(-8, 0, -21, -27, -43, -24, .3, .51, .86);
@@ -317,6 +325,7 @@ fn beetle_scene() {
   local_tri(-5, 15, 20, 0, 13, 12, .1, .17, .32);
   local_tri(-5, -15, -11, 0, -5, 15, .25, .4, .62);
   eyes();
+  svg_group(0);
 }
 
 fn background() {

@@ -22,6 +22,17 @@ const INPUT_ACTION_HELD = 4;
 const INPUT_ACTION_PRESSED = 5;
 const INPUT_RESTART = 9;
 
+// SVG replay identity: each logical entity gets a unique instance ID so
+// off-screen objects cannot slide into another object's draw slot.
+const SVG_GROUP_HERO = 100;
+const SVG_GROUP_TERRAIN_BASE = 200;
+const SVG_GROUP_GEM_BASE = 300;
+const SVG_GROUP_HAZARD_BASE = 400;
+const SVG_GROUP_ENEMY_BASE = 500;
+const SVG_GROUP_EXIT = 600;
+const SVG_GROUP_HUD_LEVEL_BASE = 700;
+const SVG_GROUP_HUD_GEM_BASE = 710;
+
 const PLAYER_HALF = 18;
 const PLAYER_HEIGHT = 82;
 const LEVEL_TRANSITION_TICKS = 42;
@@ -322,6 +333,7 @@ fn terrain_piece(index) {
   let right = left + TERRAIN_WIDTH[index];
   let top = TERRAIN_TOP[index];
   if (visible(left, right) == 1) {
+    svg_group(SVG_GROUP_TERRAIN_BASE + index);
     let a = left - camera_x;
     let b = right - camera_x;
     let ground_r = LEVEL_GROUND_R[current_level];
@@ -336,6 +348,7 @@ fn terrain_piece(index) {
       tri(a, top, b, top, b, top + 8, 0.91, 0.66, 0.24);
       tri(a, top, b, top + 8, a, top + 8, 0.57, 0.29, 0.18);
     }
+    svg_group(0);
   }
 }
 
@@ -362,7 +375,9 @@ fn gems_scene() {
   let i = 0;
   while (i < GEM_COUNT) {
     if (GEM_LEVEL[i] == current_level) {
+      svg_group(SVG_GROUP_GEM_BASE + i);
       gem(GEM_X[i], GEM_Y[i], gem_taken[i]);
+      svg_group(0);
     }
     i = i + 1;
   }
@@ -380,7 +395,9 @@ fn hazards_scene() {
   let i = 0;
   while (i < HAZARD_COUNT) {
     if (HAZARD_LEVEL[i] == current_level) {
+      svg_group(SVG_GROUP_HAZARD_BASE + i);
       hazard(HAZARD_X[i], HAZARD_Y, HAZARD_WIDTH[i]);
+      svg_group(0);
     }
     i = i + 1;
   }
@@ -394,6 +411,7 @@ fn exit_gate() {
     unlocked = 1;
   }
   if (visible(x - 38, x + 38) == 1) {
+    svg_group(SVG_GROUP_EXIT);
     tri(sx - 32, 500, sx - 32, 390, sx, 360, 0.24, 0.17, 0.20);
     tri(sx - 32, 500, sx, 360, sx + 32, 500, 0.11, 0.08, 0.13);
     if (unlocked == 1) {
@@ -402,6 +420,7 @@ fn exit_gate() {
     } else {
       tri(sx - 23, 490, sx, 388, sx + 23, 490, 0.90, 0.20, 0.22);
     }
+    svg_group(0);
   }
 }
 
@@ -409,6 +428,7 @@ fn enemies_scene() {
   let i = 0;
   while (i < ENEMY_COUNT) {
     if (ENEMY_LEVEL[i] == current_level && enemy_alive[i] == 1) {
+      svg_group(SVG_GROUP_ENEMY_BASE + i);
       let phase = enemy_clock % 2;
       let y = ENEMY_Y[i];
       if (ENEMY_TYPE[i] == 0) {
@@ -417,6 +437,7 @@ fn enemies_scene() {
         y = y + (enemy_clock % 40 - 20) * 0.45;
         fly(enemy_x[i], y, phase);
       }
+      svg_group(0);
     }
     i = i + 1;
   }
@@ -434,6 +455,7 @@ fn hud() {
   let i = 0;
   while (i < 3) {
     let px = 610 + i * 38;
+    svg_group(SVG_GROUP_HUD_LEVEL_BASE + i);
     if (i < current_level) {
       tri(px, 39, px + 14, 25, px + 28, 39, 0.31, 0.95, 0.57);
     } else if (i == current_level) {
@@ -441,18 +463,25 @@ fn hud() {
     } else {
       tri(px, 39, px + 14, 25, px + 28, 39, 0.25, 0.21, 0.28);
     }
+    svg_group(0);
     i = i + 1;
   }
   // Tiny gem pips keep the requirement visible without a text dependency.
   i = 0;
   while (i < required) {
     let gem_px = 190 + i * 28;
+    svg_group(SVG_GROUP_HUD_GEM_BASE + i * 2);
     if (i < gem_count) {
       tri(gem_px, 32, gem_px + 8, 24, gem_px + 16, 32, 0.37, 0.98, 0.84);
-      tri(gem_px, 32, gem_px + 16, 32, gem_px + 8, 41, 0.98, 0.92, 0.39);
     } else {
       tri(gem_px, 32, gem_px + 8, 24, gem_px + 16, 32, 0.30, 0.24, 0.32);
     }
+    svg_group(0);
+    svg_group(SVG_GROUP_HUD_GEM_BASE + i * 2 + 1);
+    if (i < gem_count) {
+      tri(gem_px, 32, gem_px + 16, 32, gem_px + 8, 41, 0.98, 0.92, 0.39);
+    }
+    svg_group(0);
     i = i + 1;
   }
 }
@@ -496,7 +525,9 @@ fn scene() {
     gems_scene();
     enemies_scene();
     exit_gate();
+    svg_group(SVG_GROUP_HERO);
     hero(player_x, player_y, player_facing, player_pose);
+    svg_group(0);
     hud();
   }
   if (state == STATE_TRANSITION) {
