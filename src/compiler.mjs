@@ -17,11 +17,14 @@ const BUILTINS = Object.freeze({
 
 const F32 = 0x7d;
 const TRIANGLE_PACK_ENCODING = "triangles-i8-palette-f32";
+const PACKED_TRIANGLE_UNSUPPORTED = "SLIM_PACKING_UNSUPPORTED";
 
-function compileError(message, token) {
+function compileError(message, token, code) {
   const line = token?.line ?? 1;
   const column = token?.column ?? 1;
-  throw new SyntaxError(`Slim compile error at ${line}:${column}: ${message}`);
+  const error = new SyntaxError(`Slim compile error at ${line}:${column}: ${message}`);
+  if (code !== undefined) error.code = code;
+  throw error;
 }
 
 function isIdentifierStart(ch) {
@@ -1165,12 +1168,59 @@ function f32Bits(value) {
   return view.getUint32(0, true);
 }
 
+// Compact array storage is a physical representation detail.  The Slim
+// frontend continues to expose f32 values, so only immutable arrays whose
+// already-rounded values are exact, negative-zero-free integers can use it.
+function chooseIntegerArrayEncoding(array, integerArrayStorage, packing) {
+  if (integerArrayStorage !== "compact" || array.mutable || packing) return "f32";
+
+  const values = array.values;
+  if (!values.every((value) => (
+    Number.isFinite(value) && Number.isInteger(value) && !Object.is(value, -0)
+  ))) {
+    return "f32";
+  }
+
+  if (values.every((value) => value >= 0)) {
+    if (values.every((value) => value <= 0xff)) return "u8";
+    if (values.every((value) => value <= 0xffff)) return "u16";
+    return "f32";
+  }
+  if (values.every((value) => value >= -0x80 && value <= 0x7f)) return "i8";
+  if (values.every((value) => value >= -0x8000 && value <= 0x7fff)) return "i16";
+  return "f32";
+}
+
+function integerArrayElementBytes(encoding) {
+  return encoding === "i8" || encoding === "u8" ? 1 : 2;
+}
+
+function integerArrayDataBytes(values, encoding) {
+  const bytes = [];
+  const elementBytes = integerArrayElementBytes(encoding);
+  for (const value of values) {
+    bytes.push(value & 0xff);
+    if (elementBytes === 2) bytes.push((value >>> 8) & 0xff);
+  }
+  return bytes;
+}
+
+function integerArrayLoad(encoding) {
+  switch (encoding) {
+    case "i8": return {opcode: 0x2c, conversion: 0xb2, alignment: 0x00};
+    case "u8": return {opcode: 0x2d, conversion: 0xb3, alignment: 0x00};
+    case "i16": return {opcode: 0x2e, conversion: 0xb2, alignment: 0x01};
+    case "u16": return {opcode: 0x2f, conversion: 0xb3, alignment: 0x01};
+    default: throw new Error(`internal error: unsupported integer array encoding ${JSON.stringify(encoding)}`);
+  }
+}
+
 function preparePackedTriangleArray(array) {
   if (array.mutable) {
-    compileError(`packed triangle array ${JSON.stringify(array.name)} must be an immutable const array`, array.token);
+    compileError(`packed triangle array ${JSON.stringify(array.name)} must be an immutable const array`, array.token, PACKED_TRIANGLE_UNSUPPORTED);
   }
   if (array.length % 9 !== 0) {
-    compileError(`packed triangle array ${JSON.stringify(array.name)} length must be a multiple of 9`, array.token);
+    compileError(`packed triangle array ${JSON.stringify(array.name)} length must be a multiple of 9`, array.token, PACKED_TRIANGLE_UNSUPPORTED);
   }
 
   const dataBytes = [];
@@ -1184,12 +1234,14 @@ function preparePackedTriangleArray(array) {
         compileError(
           `packed triangle array ${JSON.stringify(array.name)} coordinate ${base + lane} must be a finite integer in [-128, 127]`,
           array.token,
+          PACKED_TRIANGLE_UNSUPPORTED,
         );
       }
       if (Object.is(value, -0)) {
         compileError(
           `packed triangle array ${JSON.stringify(array.name)} coordinate ${base + lane} cannot be negative zero`,
           array.token,
+          PACKED_TRIANGLE_UNSUPPORTED,
         );
       }
       dataBytes.push(value & 0xff);
@@ -1201,7 +1253,7 @@ function preparePackedTriangleArray(array) {
     if (paletteIndex === undefined) {
       paletteIndex = paletteValues.length / 3;
       if (paletteIndex >= 256) {
-        compileError(`packed triangle array ${JSON.stringify(array.name)} palette exceeds 256 colors`, array.token);
+        compileError(`packed triangle array ${JSON.stringify(array.name)} palette exceeds 256 colors`, array.token, PACKED_TRIANGLE_UNSUPPORTED);
       }
       paletteIndices.set(key, paletteIndex);
       paletteValues.push(...color);
@@ -1231,6 +1283,7 @@ function typeKey(params) {
 function emitModule(program, options = {}) {
   const globalStorage = options.globalStorage ?? "globals";
   const packedTriangleNames = options.packedTriangleArrays ?? [];
+  const integerArrayStorage = options.integerArrayStorage ?? "f32";
   const globals = program.globals.map((global) => ({
     name: global.name,
     value: evalConstant(global.expression),
@@ -1263,19 +1316,30 @@ function emitModule(program, options = {}) {
       });
     }
   }
-  const arrayStorage = program.arrays.map((array) => ({
-    declaration: array,
-    packing: packedTriangles.get(array.name) ?? null,
-    materialized: array.mutable || dynamicArrayNames.has(array.name),
-    offset: null,
-  }));
+  const arrayStorage = program.arrays.map((array) => {
+    const packing = packedTriangles.get(array.name) ?? null;
+    const encoding = packing
+      ? packing.encoding
+      : chooseIntegerArrayEncoding(array, integerArrayStorage, packing);
+    const elementBytes = packing ? null : encoding === "f32" ? 4 : integerArrayElementBytes(encoding);
+    const physicalByteLength = packing?.byteLength ?? array.length * elementBytes;
+    return {
+      declaration: array,
+      packing,
+      encoding,
+      elementBytes,
+      physicalByteLength,
+      materialized: array.mutable || dynamicArrayNames.has(array.name),
+      offset: null,
+    };
+  });
   const arrayStorageByName = new Map(arrayStorage.map((item) => [item.declaration.name, item]));
   const scalarMemoryBytes = globalStorage === "memory" ? globals.length * 4 : 0;
   let nextArrayOffset = scalarMemoryBytes;
   for (const item of arrayStorage) {
     if (!item.materialized) continue;
     item.offset = nextArrayOffset;
-    nextArrayOffset += item.packing?.byteLength ?? item.declaration.byteLength;
+    nextArrayOffset += item.physicalByteLength;
   }
   const allocatedBytes = Math.max(scalarMemoryBytes, nextArrayOffset);
 
@@ -1350,8 +1414,7 @@ function emitModule(program, options = {}) {
   // packed byte array can leave the next f32 array or scalar at an unaligned
   // address; alignment is only a hint, but emitting zero there accurately
   // describes the access and works on every WASM engine.
-  const memoryAccess = (opcode, offset) => {
-    const alignment = offset % 4 === 0 ? 0x02 : 0x00;
+  const memoryAccess = (opcode, offset, alignment = offset % 4 === 0 ? 0x02 : 0x00) => {
     const direct = [0x41, ...s32(offset), opcode, alignment, 0x00];
     const memarg = [0x41, 0x00, opcode, alignment, ...u32(offset)];
     return direct.length <= memarg.length ? direct : memarg;
@@ -1508,7 +1571,7 @@ function emitModule(program, options = {}) {
     code.push(...condition, 0x04, 0x40, 0x00, 0x0b);
   }
 
-  function emitCheckedArrayIndex(node, context, declaration, leaveLogicalIndex = false) {
+  function emitCheckedArrayIndex(node, context, declaration, leaveLogicalIndex = false, elementBytes = 4) {
     const temp = context.layout.arrayTemps.get(node);
     if (temp === undefined) {
       compileError("internal error: missing array index temporary", node.token);
@@ -1523,7 +1586,16 @@ function emitModule(program, options = {}) {
       code.push(...local());
       return code;
     }
-    code.push(...local(), 0xa8, 0x41, 0x02, 0x74);
+    if (elementBytes === 4) {
+      // Keep the established f32-array sequence byte-for-byte identical.
+      code.push(...local(), 0xa8, 0x41, 0x02, 0x74);
+    } else if (elementBytes === 2) {
+      code.push(...local(), 0xa8, 0x41, 0x01, 0x74);
+    } else if (elementBytes === 1) {
+      code.push(...local(), 0xa8);
+    } else {
+      throw new Error(`internal error: unsupported array element width ${elementBytes}`);
+    }
     return code;
   }
 
@@ -1539,10 +1611,22 @@ function emitModule(program, options = {}) {
       return code;
     }
     if (node.constantIndex !== undefined) {
-      return memoryAccess(0x2a, storage.offset + node.constantIndex * 4);
+      if (storage.encoding === "f32") {
+        return memoryAccess(0x2a, storage.offset + node.constantIndex * 4);
+      }
+      const load = integerArrayLoad(storage.encoding);
+      const address = storage.offset + node.constantIndex * storage.elementBytes;
+      const alignment = address % storage.elementBytes === 0 ? load.alignment : 0x00;
+      return [...memoryAccess(load.opcode, address, alignment), load.conversion];
     }
-    const code = emitCheckedArrayIndex(node, context, declaration);
-    code.push(0x2a, 0x02, ...u32(storage.offset));
+    const code = emitCheckedArrayIndex(node, context, declaration, false, storage.elementBytes);
+    if (storage.encoding === "f32") {
+      code.push(0x2a, 0x02, ...u32(storage.offset));
+      return code;
+    }
+    const load = integerArrayLoad(storage.encoding);
+    const alignment = storage.offset % storage.elementBytes === 0 ? load.alignment : 0x00;
+    code.push(load.opcode, alignment, ...u32(storage.offset), load.conversion);
     return code;
   }
 
@@ -1726,6 +1810,7 @@ function emitModule(program, options = {}) {
     ...arrayStorage.flatMap((item) => {
       if (!item.materialized) return [];
       if (item.packing) return [...item.packing.dataBytes, ...item.packing.paletteBytes];
+      if (item.encoding !== "f32") return integerArrayDataBytes(item.declaration.values, item.encoding);
       return item.declaration.values.flatMap((value) => f32Bytes(value));
     }),
   ];
@@ -1758,7 +1843,7 @@ function emitModule(program, options = {}) {
       length: item.declaration.length,
       offset: item.offset,
       byteOffset: item.offset,
-      byteLength: item.packing?.byteLength ?? item.declaration.byteLength,
+      byteLength: item.physicalByteLength,
       materialized: item.materialized,
       values: item.declaration.values.slice(),
     };
@@ -1769,6 +1854,10 @@ function emitModule(program, options = {}) {
       if (item.materialized) {
         layout.paletteOffset = item.offset + item.packing.dataBytes.length;
       }
+    } else if (item.encoding !== "f32") {
+      layout.encoding = item.encoding;
+      layout.elementBytes = item.elementBytes;
+      layout.physicalByteLength = item.physicalByteLength;
     }
     return layout;
   });
@@ -1779,6 +1868,7 @@ function emitModule(program, options = {}) {
     functions: reachability.reachable.map((fn) => fn.name),
     globals: globals.map((global) => global.name),
     globalStorage,
+    integerArrayStorage,
     arrays: arrayLayout,
     arrayLayout,
     memoryPages,
@@ -1818,13 +1908,21 @@ export function compileDetailed(source, options = {}) {
     throw new TypeError("Slim compile error: options must be an object");
   }
   const optionNames = Object.keys(options);
-  const unsupported = optionNames.find((name) => name !== "globalStorage" && name !== "packedTriangleArrays");
+  const unsupported = optionNames.find((name) => (
+    name !== "globalStorage" && name !== "packedTriangleArrays" && name !== "integerArrayStorage"
+  ));
   if (unsupported) {
     throw new TypeError(`Slim compile error: unsupported option ${JSON.stringify(unsupported)}`);
   }
   const globalStorage = options.globalStorage ?? "globals";
   if (globalStorage !== "globals" && globalStorage !== "memory") {
     throw new TypeError(`Slim compile error: globalStorage must be "globals" or "memory", got ${JSON.stringify(globalStorage)}`);
+  }
+  const integerArrayStorage = options.integerArrayStorage === undefined
+    ? "f32"
+    : options.integerArrayStorage;
+  if (integerArrayStorage !== "f32" && integerArrayStorage !== "compact") {
+    throw new TypeError(`Slim compile error: integerArrayStorage must be "f32" or "compact", got ${JSON.stringify(integerArrayStorage)}`);
   }
   const packedTriangleArrays = options.packedTriangleArrays === undefined
     ? []
@@ -1843,7 +1941,11 @@ export function compileDetailed(source, options = {}) {
     packedNames.add(name);
   }
   const program = parseProgram(source);
-  return emitModule(program, {globalStorage, packedTriangleArrays: [...packedNames]});
+  return emitModule(program, {
+    globalStorage,
+    integerArrayStorage,
+    packedTriangleArrays: [...packedNames],
+  });
 }
 
 export default compile;

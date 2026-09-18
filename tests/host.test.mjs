@@ -122,11 +122,20 @@ async function bootPage(page, {audio = false, javascript = false} = {}) {
 }
 
 async function boot(source, options = {}) {
-  return bootPage(makeHtml(compile(source), {title: 'host test', keyboardOnly: options.keyboardOnly}), options);
+  return bootPage(makeHtml(compile(source), {
+    title: 'host test',
+    keyboardOnly: options.keyboardOnly,
+    soundPacking: options.soundPacking
+  }), options);
 }
 
 async function bootJavaScript(imports, options = {}) {
-  return bootPage(makeJavaScriptHtml(jsFactory, {title: 'host test', imports, keyboardOnly: options.keyboardOnly}), {...options, javascript: true});
+  return bootPage(makeJavaScriptHtml(jsFactory, {
+    title: 'host test',
+    imports,
+    keyboardOnly: options.keyboardOnly,
+    soundPacking: options.soundPacking
+  }), {...options, javascript: true});
 }
 
 function keyboard(key, code = key, repeat = false) {
@@ -135,6 +144,22 @@ function keyboard(key, code = key, repeat = false) {
 
 function pointer(button = 0) {
   return {button, pointerId: 1, clientX: 400, clientY: 300};
+}
+
+function audioSchedule(host, calls) {
+  for (const call of calls) host.imports.e.sound(...call);
+  return host.audioNodes.map((node) => node.kind === 'oscillator'
+    ? {
+      kind: node.kind,
+      type: node.type,
+      frequency: {sets: node.frequency.sets, ramps: node.frequency.ramps},
+      starts: node.starts,
+      stops: node.stops
+    }
+    : {
+      kind: node.kind,
+      gain: {sets: node.gain.sets, ramps: node.gain.ramps}
+    });
 }
 
 test('input-only host pointerdown has no undefined audio unlock reference', async () => {
@@ -185,6 +210,34 @@ test('zero-gain sound does not construct audio or oscillator nodes', async () =>
     host.imports.e.sound(0, 0, 0.5);
     assert.deepEqual(host.audioStats, {contexts: 1, oscillators: 1});
   }
+});
+
+test('sound packing modes preserve exact ten-voice WebAudio schedules', async () => {
+  const calls = [
+    [0, 1.125, .123],
+    [1, -7.375, .37],
+    [2, 3.625, .27],
+    [3, -2.25, .61],
+    [4, .75, .91]
+  ];
+  const schedules = [];
+  for (const javascript of [false, true]) {
+    for (const soundPacking of ['none', 'numbers', 'bytes']) {
+      const host = javascript
+        ? await bootJavaScript(['sound'], {audio: true, soundPacking})
+        : await boot(soundSource, {audio: true, soundPacking});
+      const schedule = audioSchedule(host, calls);
+      assert.equal(schedule.filter((node) => node.kind === 'oscillator').length, 10);
+      schedules.push(schedule);
+    }
+  }
+  for (const schedule of schedules.slice(1)) assert.deepEqual(schedule, schedules[0]);
+});
+
+test('soundPacking rejects unknown modes even when sound is unused', () => {
+  const wasm = compile(inputSource);
+  assert.throws(() => makeHtml(wasm, {soundPacking: 'packed'}), TypeError);
+  assert.throws(() => makeJavaScriptHtml(jsFactory, {imports: ['input'], soundPacking: 'packed'}), TypeError);
 });
 
 test('sound presets schedule finite, distinct musical gestures', async () => {

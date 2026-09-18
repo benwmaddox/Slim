@@ -24,6 +24,28 @@ plain and optional Binaryen `-Oz`, `-Os`, `-O4`, and `-Oz --converge`, and origi
 Terser-minified scripts.
 It selects by complete ZIP size, including archive overhead.
 
+For a release build, add `--release` or run `npm run build:release`. This also
+compares f32 and compact integer-array storage, plus plain, compact numeric,
+and byte-string sound presets. Supply triangle
+array names to compare their packed and unpacked WASM forms:
+
+```sh
+node tools/build.mjs examples/shardbound.slim --release --keyboard-only --pack-triangles ATLAS
+```
+
+Each backend keeps its smallest measured complete ZIP. Equal sizes favor simpler
+encodings. Release builds default to staged search: change one setting at a time
+and recheck for interactions in a second pass. Cached trials avoid repeated work.
+Use `--search exhaustive` for a complete audit, or `--search staged` to use the
+same approach in an ordinary build. The size report records phase savings,
+selected settings, and unsupported candidates. Trial files stay temporary.
+See [STAGED_SEARCH.md](STAGED_SEARCH.md) for the order and limits.
+Without `--release`, `--pack-triangles` forces packing. Use `--sound-packing`
+with `none`, `numbers`, or `bytes` to force a sound format;
+`--sound-packing auto` compares them. `--integer-arrays f32`, `compact`, or
+`auto` controls the exact integer-storage experiment; ordinary builds default
+to f32. JS/HTML minification runs on every build.
+
 `rainbow.js.html` / `rainbow.js.zip` contain the native JavaScript version;
 `rainbow.js` is its readable generated factory.
 `rainbow.size.json` records every candidate against the 13,312-byte target.
@@ -81,11 +103,11 @@ Enemy pools share update loops, and characters use an atlas of reusable triangle
 parts with translation, scale, flip, and pose transforms. This exercises content
 reuse rather than adding a general game engine.
 
-`npm run build:shardbound` enables the packed-triangle prototype for the immutable
-`ATLAS` array. The JavaScript profile remains the normal numeric-array build, so
-the command still compares the packed WASM package against the same native JS
-profile. Directly invoke `tools/build.mjs` without `--pack-triangles` for the
-unpacked control. Both builds keep eight files under the `shardbound` basename.
+`npm run build:shardbound` enables release selection for the immutable `ATLAS`
+array and the shared sound host. The JavaScript profile keeps ordinary numeric
+geometry. Directly invoke `tools/build.mjs` without `--release` or
+`--pack-triangles` for the unpacked control. Both builds keep eight files under
+the `shardbound` basename.
 Serve
 `dist/shardbound.html` or open `dist/shardbound.js.html` for the native JS version.
 
@@ -217,6 +239,8 @@ are historical, rather than promises for checked indexing.
 The immutable triangle-array packing experiment is described in
 [PACKED_TRIANGLES.md](PACKED_TRIANGLES.md). It is enabled only for selected WASM
 builds and leaves `compileJavaScript(source)` unchanged.
+See [INTEGER_ARRAYS.md](INTEGER_ARRAYS.md) for exact byte/short storage and
+the level-data cleanup.
 
 `node tools/compare-wasm-opt.mjs` compares optimizer settings by complete ZIP
 size and validates gameplay callbacks. Reports go under `output`. See

@@ -120,7 +120,7 @@ fn frame() { tri(x, 100, x + 20, 100, x, 120, 0.2, 0.7, 1); }
     const report = JSON.parse(await readFile(join(output, `${stem}.size.json`), 'utf8'));
     assert.equal(report.source, sourceName);
     assert.equal(report.stem, stem);
-    assert.equal(report.version, 3);
+    assert.equal(report.version, 6);
     assert.equal(report.selectedWasm.backend, 'wasm');
     assert.equal(report.selectedJs.precision, 'native');
     assert.equal(report.selectedF32, null);

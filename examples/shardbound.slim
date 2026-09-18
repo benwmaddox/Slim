@@ -122,7 +122,7 @@ const TERRAIN_KIND = [
 const LEVEL_LENGTH = [1500, 1600, 1750];
 const LEVEL_EXIT_X = [1390, 1500, 1660];
 const LEVEL_REQUIRED_GEMS = [2, 3, 3];
-const LEVEL_START_X = [120, 120, 120];
+const LEVEL_START_X = 120;
 const LEVEL_SKY_R = [0.49, 0.12, 0.08];
 const LEVEL_SKY_G = [0.79, 0.56, 0.13];
 const LEVEL_SKY_B = [0.92, 0.85, 0.44];
@@ -142,7 +142,7 @@ const GEM_Y = [360, 300, 310, 355, 270, 230, 250, 350, 250, 210, 250];
 
 const HAZARD_LEVEL = [0, 0, 1, 1, 2, 2, 2, 2];
 const HAZARD_X = [515, 1018, 335, 820, 280, 630, 950, 1320];
-const HAZARD_Y = [500, 500, 500, 500, 500, 500, 500, 500];
+const HAZARD_Y = 500;
 const HAZARD_WIDTH = [42, 34, 38, 44, 38, 42, 46, 38];
 
 global player_x = 120;
@@ -380,7 +380,7 @@ fn hazards_scene() {
   let i = 0;
   while (i < HAZARD_COUNT) {
     if (HAZARD_LEVEL[i] == current_level) {
-      hazard(HAZARD_X[i], HAZARD_Y[i], HAZARD_WIDTH[i]);
+      hazard(HAZARD_X[i], HAZARD_Y, HAZARD_WIDTH[i]);
     }
     i = i + 1;
   }
@@ -529,7 +529,7 @@ fn reset_enemies() {
 }
 
 fn reset_level() {
-  player_x = LEVEL_START_X[current_level];
+  player_x = LEVEL_START_X;
   player_y = 500;
   player_vx = 0;
   player_vy = 0;
@@ -574,7 +574,7 @@ fn lose() {
 fn check_hazards() {
   let i = 0;
   while (i < HAZARD_COUNT) {
-    if (HAZARD_LEVEL[i] == current_level && absolute(player_x - HAZARD_X[i]) < HAZARD_WIDTH[i] + PLAYER_HALF && absolute(player_y - HAZARD_Y[i]) < 66) {
+    if (HAZARD_LEVEL[i] == current_level && absolute(player_x - HAZARD_X[i]) < HAZARD_WIDTH[i] + PLAYER_HALF && absolute(player_y - HAZARD_Y) < 66) {
       lose();
     }
     i = i + 1;
@@ -621,7 +621,7 @@ fn advance_level() {
     sound(SOUND_WIN, 12, 0.20);
   } else {
     current_level = current_level + 1;
-    player_x = LEVEL_START_X[current_level];
+    player_x = LEVEL_START_X;
     player_y = 500;
     player_vx = 0;
     player_vy = 0;

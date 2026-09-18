@@ -161,36 +161,34 @@ test('uses physical packed bytes for page capacity and keeps the logical cap', (
 
 test('rejects invalid packed targets and triangle formats', () => {
   const prefix = 'fn init() {} fn frame() { return 0; }';
-  assert.throws(
-    () => compileDetailed(prefix, {packedTriangleArrays: ['MISSING']}),
-    /packed triangle target .*not a declared array/,
-  );
-  assert.throws(
-    () => compileDetailed('global MUTABLE = [0,1,2,3,4,5,6,7,8]; fn init() {} fn frame() { return MUTABLE[0]; }', {
-      packedTriangleArrays: ['MUTABLE'],
-    }),
-    /must be an immutable const array/,
-  );
-  assert.throws(
-    () => compileDetailed('const SHORT = [0,1,2]; fn init() {} fn frame() { return SHORT[0]; }', {
-      packedTriangleArrays: ['SHORT'],
-    }),
-    /length must be a multiple of 9/,
-  );
+  const capture = (action) => {
+    try {
+      action();
+    } catch (error) {
+      return error;
+    }
+    assert.fail('expected action to throw');
+  };
+  const unknown = capture(() => compileDetailed(prefix, {packedTriangleArrays: ['MISSING']}));
+  assert.match(unknown.message, /packed triangle target .*not a declared array/);
+  assert.equal(unknown.code, undefined);
+
+  const assertUnsupported = (source, pattern) => {
+    const error = capture(() => compileDetailed(source, {packedTriangleArrays: ['BAD']}));
+    assert.match(error.message, pattern);
+    assert.equal(error.code, 'SLIM_PACKING_UNSUPPORTED');
+  };
+  assertUnsupported('global BAD = [0,1,2,3,4,5,6,7,8]; fn init() {} fn frame() { return BAD[0]; }', /must be an immutable const array/);
+  assertUnsupported('const BAD = [0,1,2]; fn init() {} fn frame() { return BAD[0]; }', /length must be a multiple of 9/);
   for (const value of ['1.5', '128', '-129', '-0']) {
     const source = `const BAD = [${value}, 0, 0, 0, 0, 0, 0, 0, 0]; ${prefix}`;
-    assert.throws(
-      () => compileDetailed(source, {packedTriangleArrays: ['BAD']}),
-      /coordinate .*must be|coordinate .*negative zero/,
-      `coordinate ${value} should be rejected`,
-    );
+    assertUnsupported(source, /coordinate .*must be|coordinate .*negative zero/);
   }
 
   const manyColors = Array.from({length: 257}, (_, index) => `0,0,0,0,0,0,${index},0,0`).join(',');
-  assert.throws(
-    () => compileDetailed(`const MANY = [${manyColors}]; ${prefix}`, {packedTriangleArrays: ['MANY']}),
-    /palette exceeds 256 colors/,
-  );
+  const paletteError = capture(() => compileDetailed(`const MANY = [${manyColors}]; ${prefix}`, {packedTriangleArrays: ['MANY']}));
+  assert.match(paletteError.message, /palette exceeds 256 colors/);
+  assert.equal(paletteError.code, 'SLIM_PACKING_UNSUPPORTED');
   assert.throws(
     () => compileDetailed(prefix, {packedTriangleArrays: null}),
     /packedTriangleArrays must be an array/,

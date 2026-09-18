@@ -12,14 +12,22 @@ accepted:
 
 ```sh
 node tools/build.mjs examples/shardbound.slim --keyboard-only --pack-triangles ATLAS
-node tools/build.mjs examples/shardbound.slim --pack-triangles ATLAS --pack-triangles OTHER --out-dir output/packed-triangles/packed
+node tools/build.mjs examples/shardbound.slim --release --keyboard-only --pack-triangles ATLAS
 ```
 
-`npm run build:shardbound` supplies `--pack-triangles ATLAS` by default. The
-JavaScript backend does not receive this option and continues to emit its normal
+`npm run build:shardbound` supplies `--release --pack-triangles ATLAS` by default.
+Release builds compare unpacked and packed WASM candidates by complete ZIP size.
+Without `--release`, `--pack-triangles` forces the selected encoding for testing.
+The JavaScript backend does not receive this option and continues to emit its normal
 numeric `Float32Array` representation. This keeps the JS artifact and archive
 byte-identical between the unpacked and packed builds when the source and host
 options are the same.
+
+If byte packing cannot represent a requested array, release builds record the
+skipped candidate and retain the unpacked version. Forced packing still fails.
+Unknown array names remain errors in both modes. The size report distinguishes
+requested arrays from the arrays packed in the selected WASM artifact; its
+compiler layout always describes that selected artifact.
 
 The logical array stride is nine f32 values per triangle:
 
@@ -75,8 +83,11 @@ artifact and archive stayed byte-identical:
 its callback and optimizer comparison, and `tools/compare-state.mjs` accepts the
 same `--pack-triangles NAME` option for state-storage comparisons.
 
-Validation: all 76 tests pass. Packed and unpacked WASM produce identical
+At the initial packing checkpoint, all 76 tests passed. Packed and unpacked WASM produce identical
 triangle and sound callbacks across the 1,614-tick winning/loss/restart trace.
 All nine optimizer profiles preserve that behavior. Selected WASM and unchanged
 native JS pass Chrome and Firefox gameplay checks, and the eight normal dist
 artifacts match the browser-tested build.
+
+Release builds also compare exact integer storage for other immutable arrays.
+See [INTEGER_ARRAYS.md](INTEGER_ARRAYS.md) for the subsequent measurements.
