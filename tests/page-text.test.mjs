@@ -57,7 +57,12 @@ async function buildPage(name, source, flags = []) {
     const file = join(dir, `${name}.slim`);
     await writeFile(file, source);
     const result = spawnSync(process.execPath, [buildTool, file, '--out-dir', join(dir, 'out'), '--keyboard-only', ...flags], {encoding: 'utf8', windowsHide: true});
-    return {result, html: result.status === 0 ? await readFile(join(dir, 'out', `${name}.js.html`), 'utf8') : ''};
+    if (result.status !== 0) return {result, html: '', script: ''};
+    const html = await readFile(join(dir, 'out', `${name}.js.html`), 'utf8');
+    // The size search may leave the script inline or in an external file.
+    const external = html.match(/<script src="([^"]+)"/);
+    const script = external ? await readFile(join(dir, 'out', external[1]), 'utf8') : html.match(/<script>([\s\S]*)<\/script>/)[1];
+    return {result, html, script};
   } finally {
     await rm(dir, {recursive: true, force: true});
   }
@@ -84,9 +89,8 @@ test('games without text get no overlay canvas or templates', async () => {
 });
 
 test('the text host reads templates once, draws with tone and size, and clears each tick', async () => {
-  const {result, html} = await buildPage('words', textGame);
+  const {result, script} = await buildPage('words', textGame);
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
   const calls = [];
   let lookups = 0;
   const ctx = new Proxy({}, {

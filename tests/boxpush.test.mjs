@@ -18,6 +18,7 @@ function numbers(name) {
 
 const LEVEL_COUNT = 6;
 const CLEAR_READY = 44;
+const PART_LIFE_MAX = 60;
 const MOVE_TICKS = 10;
 const map = numbers('LEVEL_MAP');
 const boxes = numbers('LEVEL_BOX');
@@ -64,6 +65,8 @@ function makeRuntime(backend = 'wasm', options = {}) {
     tri(...args) { triangles.push(args); return 0; },
     sound(...args) { sounds.push(args); return 0; },
     text(...args) { texts.push(args); return 0; },
+    sin: Math.sin,
+    cos: Math.cos,
   };
   const code = instrumented();
   let game;
@@ -555,4 +558,87 @@ test('text appears on the clear and win screens and not while playing', () => {
       assert.ok(textIds(runtime.wait(5)).includes(12), 'the win screen congratulates');
     }
   });
+});
+
+// ---- Shape variety -------------------------------------------------------
+// quad() emits two right triangles that tile an axis-aligned rectangle, and
+// diamond() emits two that tile a diamond. Everything else is a "lone"
+// triangle: rotated shards, star points, bevel faces, facets, caps, shadows.
+function shapes(frame) {
+  const t = frame.triangles;
+  let rectangles = 0;
+  let diamonds = 0;
+  const lone = [];
+  for (let i = 0; i < t.length; i += 1) {
+    const a = t[i];
+    const b = t[i + 1];
+    if (b && a[1] === a[3] && a[2] === a[4] && b[0] === a[0] && b[1] === a[1] && b[2] === a[4] && b[3] === a[5] && b[4] === a[0] && b[5] === a[5]) {
+      rectangles += 1;
+      i += 1;
+    } else if (b && a[0] === a[4] && a[1] === b[1] && b[0] === a[0] && b[2] === a[4] && b[3] === a[5] && a[3] === b[5]) {
+      diamonds += 1;
+      i += 1;
+    } else {
+      lone.push(a);
+    }
+  }
+  return {rectangles, diamonds, lone};
+}
+const summary = (frame) => {
+  const s = shapes(frame);
+  return `${s.rectangles} rectangles, ${s.diamonds} diamonds, ${s.lone.length} triangles`;
+};
+
+test('scenes mix rectangles, diamonds and triangles', () => {
+  const runtime = makeRuntime('wasm', {menu: true});
+  const report = {};
+  const menu = runtime.wait(80);
+  report.menu = summary(menu);
+  assert.ok(shapes(menu).lone.length >= 40, report.menu);
+  runtime.space();
+  const playing = runtime.wait(80);
+  report.play = summary(playing);
+  assert.ok(shapes(playing).lone.length >= 100, report.play);
+  assert.ok(shapes(playing).rectangles >= 100, 'rectangles remain the base of the board');
+  assert.ok(shapes(playing).diamonds >= 1, 'diamonds too (targets, pips)');
+  for (const dir of solve(levels[0]).moves) runtime.tap(dir);
+  const clear = runtime.wait(CLEAR_READY + 4);
+  report.clear = summary(clear);
+  assert.ok(shapes(clear).lone.length >= shapes(playing).lone.length + 30, 'stars and confetti add many triangles');
+  console.log(`shapes per scene: ${JSON.stringify(report, null, 1)}`);
+});
+
+test('a crate landing on a target throws spinning gold shards that fade out', () => {
+  const runtime = makeRuntime('wasm');
+  runtime.wait(60);
+  for (const dir of solve(levels[0]).moves) runtime.tap(dir);
+  runtime.wait(CLEAR_READY);
+  runtime.menuKey();
+  runtime.wait(60);
+  runtime.space(); // level 2 has two crates, so the first landing does not clear the level
+  runtime.wait(80);
+  const gold = (frame) => shapes(frame).lone.filter((t) => t[6] > 0.9 && t[7] > 0.7 && t[8] > 0.2 && t[8] < 0.65).length;
+  const quiet = gold(runtime.wait(1));
+  let landing = null;
+  let before = 0;
+  for (const dir of solve(levels[1]).moves) {
+    const result = runtime.tap(dir);
+    if (!landing && result.sounds.some((sound) => sound[0] === 1)) { landing = result; break; }
+    before = Math.max(before, gold(result));
+  }
+  assert.ok(landing, 'a crate landed on a target');
+  assert.equal(landing.state, 0, 'the level is not cleared yet');
+  const peak = Math.max(gold(landing), gold(runtime.wait(3)), gold(runtime.wait(3)));
+  assert.ok(peak >= quiet + 12, `a burst of gold shards (${peak} vs ${quiet} at rest)`);
+  assert.ok(before <= quiet + 2, 'none before the landing');
+  const gone = gold(runtime.wait(PART_LIFE_MAX));
+  assert.ok(gone <= quiet + 2, `shards have faded (${gone} vs ${quiet})`);
+});
+
+test('shards move: free triangles change from tick to tick', () => {
+  const runtime = makeRuntime('wasm');
+  runtime.wait(60);
+  const a = shapes(runtime.frame()).lone.map((t) => t.join());
+  const b = shapes(runtime.frame()).lone.map((t) => t.join());
+  assert.ok(b.filter((entry) => !a.includes(entry)).length >= 8, 'the background shards drift');
 });
