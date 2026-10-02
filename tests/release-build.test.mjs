@@ -52,8 +52,8 @@ const normalNames = [
   `${stem}.html`,
   `${stem}.size.json`,
   `${stem}.js`,
+  `${stem}.min.js`,
   `${stem}.js.html`,
-  `${stem}.js.zip`,
   `${stem}.zip`,
 ];
 
@@ -214,24 +214,52 @@ function expectedCandidate(candidates) {
 
 function instantiateWasm(bytes, input, sounds) {
   const module = new WebAssembly.Module(bytes);
-  const instance = new WebAssembly.Instance(module, {
-    e: {
-      input: (index) => input(index),
-      sound: (...args) => {
-        sounds.push(args);
-        return 0;
-      },
+  const exportedNames = WebAssembly.Module.exports(module).map(({name}) => name).sort();
+  const compact = exportedNames.join(',') === 'a,b';
+  if (compact) {
+    assert.deepEqual(exportedNames, ['a', 'b']);
+    assert.ok(WebAssembly.Module.exports(module).every(({kind}) => kind === 'function'));
+  } else {
+    assert.deepEqual(exportedNames, ['frame', 'init', 'memory']);
+  }
+  const host = {
+    tri: () => 0,
+    sound: (...args) => {
+      sounds.push(args);
+      return 0;
     },
+    input: (index) => input(index),
+    text: () => '',
+    sin: Math.sin,
+    cos: Math.cos,
+    atan2: Math.atan2,
+    pow: Math.pow,
+  };
+  const compactImports = {a: 'tri', b: 'sound', c: 'input', d: 'text', e: 'sin', f: 'cos', g: 'atan2', h: 'pow'};
+  if (compact) {
+    for (const descriptor of WebAssembly.Module.imports(module)) {
+      assert.equal(descriptor.module, 'e');
+      assert.equal(compactImports[descriptor.name] !== undefined, true, `unknown compact import ${descriptor.name}`);
+    }
+  }
+  const imports = compact
+    ? Object.fromEntries(Object.entries(compactImports).map(([name, original]) => [name, host[original]]))
+    : host;
+  const instance = new WebAssembly.Instance(module, {
+    e: imports,
   });
-  assert.equal(typeof instance.exports.init, 'function');
-  assert.equal(typeof instance.exports.frame, 'function');
-  assert.ok(instance.exports.memory instanceof WebAssembly.Memory, 'selected WASM must export memory');
-  return instance;
+  const exports = compact
+    ? {init: instance.exports.a, frame: instance.exports.b}
+    : {init: instance.exports.init, frame: instance.exports.frame, memory: instance.exports.memory};
+  assert.equal(typeof exports.init, 'function');
+  assert.equal(typeof exports.frame, 'function');
+  if (!compact) assert.ok(exports.memory instanceof WebAssembly.Memory, 'diagnostic WASM must export memory');
+  return {exports, instance};
 }
 
 function runJavaScriptFactory(code, input, sounds) {
   const factory = Function(`return (${code});`)();
-  assert.equal(typeof factory, 'function', 'readable JS artifact must be a factory');
+  assert.equal(typeof factory, 'function', 'JS artifact must be a factory');
   const runtime = factory({
     input: (index) => input(index),
     sound: (...args) => {
@@ -258,7 +286,9 @@ test('release build measures codec candidates and preserves selected backend beh
     assertBuildSucceeded(releaseResult, 'release build');
 
     const report = await readReport(releaseOutput);
-    assert.equal(report.version, 6);
+    assert.equal(report.version, 9);
+    assert.deepEqual(report.wasmInterface.exports, {init: 'a', frame: 'b'});
+    assert.deepEqual(report.wasmInterface.removedExports, ['memory']);
     assert.equal(report.search, 'exhaustive');
     assert.equal(report.release, true);
     assert.equal(report.soundPacking, 'auto');
@@ -285,10 +315,12 @@ test('release build measures codec candidates and preserves selected backend beh
     assert.deepEqual(new Set(jsCandidates.map((candidate) => JSON.stringify(candidate.packedTriangleArrays))), new Set(['[]']));
     assert.deepEqual(new Set(jsCandidates.map((candidate) => candidate.soundPacking)), new Set(soundPackings));
     assert.ok(jsCandidates.every((candidate) => candidate.integerArrayStorage === null));
-    assert.ok(wasmCandidates.every((candidate) => ['embedded', 'external'].includes(candidate.layout)));
+    assert.ok(wasmCandidates.every((candidate) => candidate.layout === 'external'));
+    assert.ok(wasmCandidates.every((candidate) => candidate.interfaceMinified === true));
+    assert.ok(wasmCandidates.every((candidate) => candidate.unminifiedWasmBytes > candidate.wasmBytes));
     assert.ok(wasmCandidates.every((candidate) => [false, true].includes(candidate.minified)));
-    assert.ok(jsCandidates.every((candidate) => candidate.layout === 'inline'));
-    assert.ok(jsCandidates.every((candidate) => [false, true].includes(candidate.minified)));
+    assert.ok(jsCandidates.every((candidate) => candidate.layout === 'external'));
+    assert.ok(jsCandidates.every((candidate) => candidate.minified === true));
     assert.ok(wasmCandidates.every((candidate) => candidate.zipBytes > 0));
     assert.ok(jsCandidates.every((candidate) => candidate.zipBytes > 0));
 
@@ -299,7 +331,7 @@ test('release build measures codec candidates and preserves selected backend beh
     }
     for (const triangleMode of triangleModes) {
       for (const optimization of optimizerNames) {
-        for (const layout of ['embedded', 'external']) {
+        for (const layout of ['external']) {
           for (const soundPacking of soundPackings) {
             for (const minified of [false, true]) {
               assert.equal(
@@ -319,7 +351,7 @@ test('release build measures codec candidates and preserves selected backend beh
       }
     }
     for (const soundPacking of soundPackings) {
-      for (const minified of [false, true]) {
+      for (const minified of [true]) {
         assert.equal(
           candidateMatching(jsCandidates, {soundPacking, minified}).length,
           1,
@@ -339,16 +371,15 @@ test('release build measures codec candidates and preserves selected backend beh
     assert.equal(selectedWasmCandidate.soundPacking, report.selectedWasm.soundPacking);
     assert.deepEqual(selectedJsCandidate.packedTriangleArrays, report.selectedJs.packedTriangleArrays);
     assert.equal(selectedJsCandidate.soundPacking, report.selectedJs.soundPacking);
-    assert.equal(report.selectedWasm.archive, `${stem}.zip`);
-    assert.equal(report.selectedJs.archive, `${stem}.js.zip`);
+    assert.equal(report.selectedWasm.archive, report.selectedOverall.backend === 'wasm' ? `${stem}.zip` : null);
+    assert.equal(report.selectedJs.archive, report.selectedOverall.backend === 'js' ? `${stem}.zip` : null);
     assert.equal(report.selectedWasm.zipBytes, Math.min(...wasmCandidates.map((candidate) => candidate.zipBytes)));
     assert.equal(report.selectedJs.zipBytes, Math.min(...jsCandidates.map((candidate) => candidate.zipBytes)));
     assert.equal(report.selectedWasm.id, expectedCandidate(wasmCandidates).id, 'WASM winner must use deterministic sound tie ordering');
     assert.equal(report.selectedJs.id, expectedCandidate(jsCandidates).id, 'JavaScript winner must use deterministic sound tie ordering');
     assertSoundTiePreference(report.selectedWasm, wasmCandidates, 'WASM');
     assertSoundTiePreference(report.selectedJs, jsCandidates, 'JavaScript');
-    assert.equal((await stat(join(releaseOutput, `${stem}.zip`))).size, report.selectedWasm.zipBytes);
-    assert.equal((await stat(join(releaseOutput, `${stem}.js.zip`))).size, report.selectedJs.zipBytes);
+    assert.equal((await stat(join(releaseOutput, `${stem}.zip`))).size, report.selectedOverall.zipBytes);
 
     const plain = compileDetailed(sourceText, {integerArrayStorage: 'f32', packedTriangleArrays: []});
     const packed = compileDetailed(sourceText, {integerArrayStorage: 'f32', packedTriangleArrays: ['ATLAS']});
@@ -387,7 +418,8 @@ test('release build measures codec candidates and preserves selected backend beh
     assert.deepEqual(wasmValues, expected, 'selected WASM must read every atlas lane');
     assert.deepEqual(soundsFromWasm, expected.map(() => [1, Math.fround(1.125), Math.fround(.5)]));
 
-    const memory = new Uint8Array(wasm.exports.memory.buffer);
+    const diagnostic = instantiateWasm(expectedDetails.wasm, () => 0, []);
+    const memory = new Uint8Array(diagnostic.exports.memory.buffer);
     const physicalBytes = [...memory.slice(selectedLayout.byteOffset, selectedLayout.byteOffset + selectedLayout.byteLength)];
     const expectedPlainBytes = expected.flatMap(f32Bytes);
     const expectedPackedBytes = [246, 0, 10, 0, 0, 246, 0, ...f32Bytes(.25), ...f32Bytes(.5), ...f32Bytes(.75)];
@@ -396,6 +428,10 @@ test('release build measures codec candidates and preserves selected backend beh
     const readableJs = await readFile(join(releaseOutput, `${stem}.js`), 'utf8');
     const originalJs = compileJavaScript(sourceText, {precision: 'native'});
     assert.equal(readableJs, originalJs.code, 'readable native JS must remain the ordinary numeric factory');
+    const minifiedJs = await readFile(join(releaseOutput, `${stem}.min.js`), 'utf8');
+    assert.ok(Buffer.byteLength(minifiedJs) < report.selectedJs.unminifiedJsBytes, 'minified browser script must be smaller than unminified host script');
+    assert.match(await readFile(join(releaseOutput, `${stem}.js.html`), 'utf8'), new RegExp(`<script src="${stem}\\.min\\.js"></script>`));
+    assert.equal(report.selectedJs.jsBytes, Buffer.byteLength(minifiedJs));
     const soundsFromJs = [];
     let jsIndex = 0;
     const javascript = runJavaScriptFactory(readableJs, () => jsIndex, soundsFromJs);
@@ -420,7 +456,7 @@ test('release build measures codec candidates and preserves selected backend beh
     const ordinaryResult = runBuild(source, ordinaryOutput, ['--search', 'exhaustive', '--keyboard-only']);
     assertBuildSucceeded(ordinaryResult, 'ordinary build');
     const ordinaryReport = await readReport(ordinaryOutput);
-    assert.equal(ordinaryReport.version, 6);
+    assert.equal(ordinaryReport.version, 9);
     assert.equal(ordinaryReport.search, 'exhaustive');
     assert.equal(ordinaryReport.release, false);
     assert.equal(ordinaryReport.soundPacking, 'none');
@@ -445,7 +481,7 @@ test('release build measures codec candidates and preserves selected backend beh
     ]);
     assertBuildSucceeded(stagedResult, 'default staged release build');
     const stagedReport = await readReport(stagedOutput);
-    assert.equal(stagedReport.version, 6);
+    assert.equal(stagedReport.version, 9);
     assert.equal(stagedReport.release, true);
     assert.equal(stagedReport.search, 'staged');
     assert.deepEqual((await readdir(stagedOutput)).sort(), [...normalNames].sort());
@@ -464,7 +500,7 @@ test('release build measures codec candidates and preserves selected backend beh
       assert.ok(candidates.some((candidate) => candidate.id === selected.id), `${backend} winner must be visited`);
     }
 
-    const expectedAxes = ['optimization', 'layout', 'triangles', 'integer-arrays', 'sound'];
+    const expectedAxes = ['optimization', 'triangles', 'integer-arrays', 'sound'];
     assert.ok(Array.isArray(stagedReport.searchStages));
     assert.ok(stagedReport.searchStages.length >= expectedAxes.length + 1,
       'staged report must include the baseline and every configured axis');
@@ -512,8 +548,7 @@ test('release build measures codec candidates and preserves selected backend beh
     for (stagedIndex = 0; stagedIndex < stagedExpected.length; stagedIndex += 1) stagedValues.push(stagedWasm.exports.frame());
     assert.deepEqual(stagedValues, stagedExpected, 'staged selected WASM must preserve fixture behavior');
     assert.deepEqual(stagedSounds, stagedExpected.map(() => [1, Math.fround(1.125), Math.fround(.5)]));
-    assert.equal((await stat(join(stagedOutput, `${stem}.zip`))).size, stagedReport.selectedWasm.zipBytes);
-    assert.equal((await stat(join(stagedOutput, `${stem}.js.zip`))).size, stagedReport.selectedJs.zipBytes);
+    assert.equal((await stat(join(stagedOutput, `${stem}.zip`))).size, stagedReport.selectedOverall.zipBytes);
 
     const stagedJs = await readFile(join(stagedOutput, `${stem}.js`), 'utf8');
     const stagedJsSounds = [];
@@ -549,7 +584,7 @@ test('release auto searches integer storage and preserves compact physical layou
     assertBuildSucceeded(result, 'integer array release build');
 
     const report = await readReport(output);
-    assert.equal(report.version, 6);
+    assert.equal(report.version, 9);
     assert.equal(report.search, 'exhaustive');
     assert.equal(report.integerArrayStorage, 'auto');
     assert.deepEqual(report.skippedCandidates, []);
@@ -565,7 +600,7 @@ test('release auto searches integer storage and preserves compact physical layou
     for (const triangleMode of triangleModes) {
       for (const integerArrayStorage of integerStorageModes) {
         for (const optimization of optimizerNames) {
-          for (const layout of ['embedded', 'external']) {
+          for (const layout of ['external']) {
             for (const soundPacking of soundPackings) {
               for (const minified of [false, true]) {
                 assert.equal(
@@ -619,7 +654,8 @@ test('release auto searches integer storage and preserves compact physical layou
     assert.deepEqual(wasmValues, expected, 'selected WASM must preserve every source value');
     assert.deepEqual(soundsFromWasm, expected.map(() => [1, Math.fround(1.125), Math.fround(.5)]));
 
-    const memory = new Uint8Array(wasm.exports.memory.buffer);
+    const diagnostic = instantiateWasm(selectedDetails.wasm, () => 0, []);
+    const memory = new Uint8Array(diagnostic.exports.memory.buffer);
     const elementBytes = report.selectedWasm.integerArrayStorage === 'compact' ? 1 : 4;
     const wideElementBytes = report.selectedWasm.integerArrayStorage === 'compact' ? 2 : 4;
     const expectedPhysicalBytes = new Map([
@@ -659,7 +695,7 @@ test('forced integer storage modes retain f32 compatibility and compact redundan
     const autoResult = runBuild(source, autoOutput, ['--release', '--sound-packing', 'auto', '--integer-arrays', 'auto', '--keyboard-only']);
     assertBuildSucceeded(autoResult, 'redundant compact release build');
     const autoReport = await readReport(autoOutput);
-    assert.equal(autoReport.version, 6);
+    assert.equal(autoReport.version, 9);
     assert.equal(autoReport.search, 'staged');
     const autoWasmCandidates = autoReport.candidates.filter((candidate) => candidate.backend === 'wasm');
     assert.ok(autoReport.skippedCandidates.some((candidate) => candidate.integerArrayStorage === 'compact'));
@@ -669,7 +705,7 @@ test('forced integer storage modes retain f32 compatibility and compact redundan
     const f32Result = runBuild(source, f32Output, ['--release', '--sound-packing', 'auto', '--integer-arrays', 'f32', '--keyboard-only']);
     assertBuildSucceeded(f32Result, 'forced f32 release build');
     const f32Report = await readReport(f32Output);
-    assert.equal(f32Report.version, 6);
+    assert.equal(f32Report.version, 9);
     assert.equal(f32Report.search, 'staged');
     assert.equal(f32Report.integerArrayStorage, 'f32');
     assert.ok(f32Report.candidates.filter((candidate) => candidate.backend === 'wasm').every((candidate) => candidate.integerArrayStorage === 'f32'));
@@ -679,7 +715,7 @@ test('forced integer storage modes retain f32 compatibility and compact redundan
     const compactResult = runBuild(source, compactOutput, ['--release', '--sound-packing', 'auto', '--integer-arrays', 'compact', '--keyboard-only']);
     assertBuildSucceeded(compactResult, 'forced compact release build');
     const compactReport = await readReport(compactOutput);
-    assert.equal(compactReport.version, 6);
+    assert.equal(compactReport.version, 9);
     assert.equal(compactReport.search, 'staged');
     assert.equal(compactReport.integerArrayStorage, 'compact');
     assert.ok(compactReport.candidates.filter((candidate) => candidate.backend === 'wasm').every((candidate) => candidate.integerArrayStorage === 'compact'));
@@ -699,7 +735,7 @@ test('release skips an unsupported packed atlas while retaining plain metadata',
     assertBuildSucceeded(result, 'fraction fallback release build');
 
     const report = await readReport(output);
-    assert.equal(report.version, 6);
+    assert.equal(report.version, 9);
     assert.equal(report.search, 'staged');
     assert.equal(report.release, true);
     assert.equal(report.soundPacking, 'auto');

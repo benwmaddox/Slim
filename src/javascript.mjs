@@ -386,6 +386,16 @@ function emitJavaScript(program, detailed, precision, svgMetadata) {
     );
   }
 
+  const arrayHelperCalls = materializedArrays.filter((array) => {
+    const values = array.values ?? [];
+    const isRepeat = array.repeatCount !== null && array.repeatCount !== undefined
+      || Boolean(array.initializer?.repeat);
+    return !isRepeat || f32Literal(values[0] ?? 0) === "0";
+  }).length;
+  // Amortize the helper across several allocations so small games stay lean.
+  const useArrayHelper = arrayHelperCalls > 2;
+  if (useArrayHelper) lines.push("  const makeArray = (values) => new Float32Array(values);");
+
   const globalContext = {
     layout: { locals: new Map(), moduloTemps: new Map() },
   };
@@ -398,9 +408,18 @@ function emitJavaScript(program, detailed, precision, svgMetadata) {
     const isRepeat = array.repeatCount !== null && array.repeatCount !== undefined
       || Boolean(array.initializer?.repeat);
     if (isRepeat) {
-      lines.push(`  const ${target} = new Float32Array(${array.length}).fill(${f32Literal(values[0] ?? 0)});`);
+      const initialValue = f32Literal(values[0] ?? 0);
+      if (initialValue === "0") {
+        const allocation = useArrayHelper
+          ? `makeArray(${array.length})`
+          : `new Float32Array(${array.length})`;
+        lines.push(`  const ${target} = ${allocation};`);
+      } else {
+        lines.push(`  const ${target} = new Float32Array(${array.length}).fill(${initialValue});`);
+      }
     } else {
-      lines.push(`  const ${target} = new Float32Array([${values.map(f32Literal).join(", ")}]);`);
+      const literal = `[${values.map(f32Literal).join(", ")}]`;
+      lines.push(`  const ${target} = ${useArrayHelper ? "makeArray" : "new Float32Array"}(${literal});`);
     }
   }
 

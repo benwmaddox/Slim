@@ -6,9 +6,10 @@ import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {compileDetailed} from '../src/compiler.mjs';
 import {compileJavaScript} from '../src/javascript.mjs';
-import {makeHtml, makeJavaScriptHtml} from '../src/host.mjs';
-import {minifyHtml} from './minify.mjs';
+import {makeHtml, makeJavaScriptHtml, MINIFIED_WASM_EXPORT_NAMES, MINIFIED_WASM_IMPORT_NAMES} from '../src/host.mjs';
+import {externalizeInlineScript, inlineScriptSource, minifyHtml} from './minify.mjs';
 import {stagedSearch} from './search.mjs';
+import {minifyWasmInterface} from './wasm-interface.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const budget = 13312;
@@ -204,7 +205,7 @@ function run(command, args, label) {
   return result;
 }
 
-async function writeArchive({python, zipTool, output, stem, html, wasm}) {
+async function writeArchive({python, zipTool, output, stem, html, wasm, javascript, javascriptName}) {
   const temporary = await mkdtemp(join(tmpdir(), 'slim-package-'));
   try {
     await writeFile(join(temporary, 'index.html'), html);
@@ -212,6 +213,11 @@ async function writeArchive({python, zipTool, output, stem, html, wasm}) {
     if (wasm) {
       await writeFile(join(temporary, `${stem}.wasm`), wasm);
       entries.push(`${stem}.wasm`);
+    }
+    if (javascript) {
+      if (!javascriptName) throw new Error('JavaScript archive entry needs a filename');
+      await writeFile(join(temporary, javascriptName), javascript);
+      entries.push(javascriptName);
     }
     run(python, [zipTool, temporary, output, ...entries], 'ZIP packaging');
     return (await stat(output)).size;
@@ -236,7 +242,12 @@ function candidateSummary(candidate) {
     soundPacking: candidate.soundPacking ?? 'none',
     integerArrayStorage: candidate.integerArrayStorage ?? null,
     wasmBytes: candidate.wasmBytes,
+    unminifiedWasmBytes: candidate.unminifiedWasmBytes ?? null,
+    interfaceMinified: candidate.interfaceMinified ?? null,
+    jsBytes: candidate.jsBytes ?? null,
+    unminifiedJsBytes: candidate.unminifiedJsBytes ?? null,
     htmlBytes: candidate.htmlBytes,
+    archiveHtmlBytes: candidate.archiveHtmlBytes ?? candidate.htmlBytes,
     zipBytes: candidate.zipBytes,
     archive: candidate.reportArchive ?? null,
   };
@@ -301,10 +312,12 @@ function obsoleteArtifacts(stem, compareF32) {
   const artifacts = [
     `${stem}.plain.wasm`,
     `${stem}.Oz.wasm`,
+    `${stem}.js.zip`,
+    `${stem}.f32.zip`,
     ...wasmCandidates.map((id) => `${stem}.${id}.zip`),
     ...javascriptCandidates.map((id) => `${stem}.${id}.zip`),
   ];
-  if (!compareF32) artifacts.push(`${stem}.f32.js`, `${stem}.f32.html`, `${stem}.f32.zip`);
+  if (!compareF32) artifacts.push(`${stem}.f32.js`, `${stem}.f32.min.js`, `${stem}.f32.html`);
   return artifacts;
 }
 
@@ -312,11 +325,8 @@ async function removeObsoleteArtifacts(output, stem, compareF32) {
   for (const name of obsoleteArtifacts(stem, compareF32)) await rm(join(output, name), {force: true});
 }
 
-function finalArchiveFor(candidate, stem, bestWasm, bestJs, bestF32) {
-  if (candidate === bestWasm) return `${stem}.zip`;
-  if (candidate === bestJs) return `${stem}.js.zip`;
-  if (candidate === bestF32) return `${stem}.f32.zip`;
-  return null;
+function finalArchiveFor(candidate, stem, bestOverall) {
+  return candidate === bestOverall ? `${stem}.zip` : null;
 }
 
 async function finishBuild({options, sourceText, staging, stem, title, python, zipTool, optimizer, records, skippedCandidates, searchStages}) {
@@ -337,56 +347,70 @@ async function finishBuild({options, sourceText, staging, stem, title, python, z
         footer,
         texts,
       });
-      const htmlVariants = [
-        {suffix: '', html: unminified, minified: false},
-        {suffix: '-min', html: await minifyHtml(unminified), minified: true},
-      ];
-      for (const htmlVariant of htmlVariants) {
-        const id = options.release || options.soundPacking !== 'none'
-          ? `${profile.name}-${soundPacking}${htmlVariant.suffix}`
-          : htmlVariant.minified ? `${profile.name}-min` : `${profile.name}-unminified`;
-        const archive = `${stem}.${id}.zip`;
-        const archivePath = join(staging, archive);
-        const zipBytes = await writeArchive({python, zipTool, output: archivePath, stem, html: htmlVariant.html});
-        records.push({
-          id,
-          backend: 'js',
-          precision: result.precision,
-          optimization: htmlVariant.minified ? 'terser' : 'none',
-          layout: 'inline',
-          minified: htmlVariant.minified,
-          triangleVariant: null,
-          packedTriangleArrays: [],
-          soundPacking,
-          integerArrayStorage: null,
-          wasmBytes: null,
-          htmlBytes: Buffer.byteLength(htmlVariant.html),
-          zipBytes,
-          archive,
-          code: result.code,
-          html: htmlVariant.html,
-        });
-      }
+      const minifiedInlineHtml = await minifyHtml(unminified);
+      const javascript = inlineScriptSource(minifiedInlineHtml);
+      const unminifiedJavaScript = inlineScriptSource(unminified);
+      const javascriptName = profile.name === 'f32' ? `${stem}.f32.min.js` : `${stem}.min.js`;
+      const html = externalizeInlineScript(minifiedInlineHtml, javascriptName);
+      const archiveHtml = externalizeInlineScript(minifiedInlineHtml, `${stem}.js`);
+      const id = options.release || options.soundPacking !== 'none'
+        ? `${profile.name}-${soundPacking}-min`
+        : `${profile.name}-min`;
+      const archive = `${stem}.${id}.zip`;
+      const archivePath = join(staging, archive);
+      const zipBytes = await writeArchive({
+        python,
+        zipTool,
+        output: archivePath,
+        stem,
+        html: archiveHtml,
+        javascript,
+        javascriptName: `${stem}.js`,
+      });
+      records.push({
+        id,
+        backend: 'js',
+        precision: result.precision,
+        optimization: 'terser',
+        layout: 'external',
+        minified: true,
+        triangleVariant: null,
+        packedTriangleArrays: [],
+        soundPacking,
+        integerArrayStorage: null,
+        wasmBytes: null,
+        jsBytes: Buffer.byteLength(javascript),
+        unminifiedJsBytes: Buffer.byteLength(unminifiedJavaScript),
+        htmlBytes: Buffer.byteLength(html),
+        archiveHtmlBytes: Buffer.byteLength(archiveHtml),
+        zipBytes,
+        archive,
+        code: result.code,
+        html,
+        javascript,
+        javascriptName,
+      });
     }
   }
 
   const bestWasm = select(records.filter((candidate) => candidate.backend === 'wasm'));
   const bestJs = select(records.filter((candidate) => candidate.backend === 'js' && candidate.precision === 'native'));
   const bestF32 = options.compareF32 ? select(records.filter((candidate) => candidate.backend === 'js' && candidate.precision === 'f32')) : null;
-  const bestOverall = select(records);
+  const bestOverall = select(records.filter((candidate) =>
+    candidate.backend === 'wasm' || (candidate.backend === 'js' && candidate.precision === 'native')));
   if (!bestWasm || !bestJs || (options.compareF32 && !bestF32)) throw new Error('Build produced no complete backend candidates');
 
   const wasmPath = join(staging, `${stem}.wasm`);
   await writeFile(wasmPath, bestWasm.bytes);
   await writeFile(join(staging, `${stem}.html`), bestWasm.html);
-  await copyFile(join(staging, bestWasm.archive), join(staging, `${stem}.zip`));
   await writeFile(join(staging, `${stem}.js`), bestJs.code);
+  await writeFile(join(staging, `${stem}.min.js`), bestJs.javascript);
   await writeFile(join(staging, `${stem}.js.html`), bestJs.html);
-  await copyFile(join(staging, bestJs.archive), join(staging, `${stem}.js.zip`));
+  await copyFile(join(staging, bestOverall.archive), join(staging, `${stem}.zip`));
   if (bestF32) {
     await writeFile(join(staging, `${stem}.f32.js`), bestF32.code);
+    await writeFile(join(staging, `${stem}.f32.min.js`), bestF32.javascript);
     await writeFile(join(staging, `${stem}.f32.html`), bestF32.html);
-    await copyFile(join(staging, bestF32.archive), join(staging, `${stem}.f32.zip`));
   }
 
   const wasmDis = configuredExecutable('wasm-dis', process.env.SLIM_WASM_DIS, optimizer);
@@ -401,17 +425,17 @@ async function finishBuild({options, sourceText, staging, stem, title, python, z
     wat: `${stem}.wat`,
     html: `${stem}.html`,
     js: `${stem}.js`,
+    minJs: `${stem}.min.js`,
     jsHtml: `${stem}.js.html`,
-    jsZip: `${stem}.js.zip`,
     zip: `${stem}.zip`,
   };
   if (bestF32) Object.assign(artifacts, {
     f32Js: `${stem}.f32.js`,
+    f32MinJs: `${stem}.f32.min.js`,
     f32Html: `${stem}.f32.html`,
-    f32Zip: `${stem}.f32.zip`,
   });
   const report = {
-    version: 6,
+    version: 9,
     release: options.release,
     search: options.search,
     source: basename(options.source),
@@ -423,15 +447,21 @@ async function finishBuild({options, sourceText, staging, stem, title, python, z
     requestedPackedTriangleArrays: options.packedTriangleArrays.slice(),
     packedTriangleArrays: bestWasm.packedTriangleArrays.slice(),
     compiler: compilerSummary(bestWasm.detailed, bestWasm.packedTriangleArrays),
+    wasmInterface: {
+      imports: MINIFIED_WASM_IMPORT_NAMES,
+      exports: MINIFIED_WASM_EXPORT_NAMES,
+      removedExports: ['memory'],
+      removedCustomSections: ['name', 'producers', 'sourceMappingURL', 'external_debug_info', '.debug_*', 'reloc.*'],
+    },
     budget,
-    selected: bestWasm.id,
-    selectedWasm: candidateSummary({...bestWasm, reportArchive: `${stem}.zip`}),
-    selectedJs: candidateSummary({...bestJs, reportArchive: `${stem}.js.zip`}),
-    selectedF32: bestF32 ? candidateSummary({...bestF32, reportArchive: `${stem}.f32.zip`}) : null,
-    selectedOverall: candidateSummary({...bestOverall, reportArchive: finalArchiveFor(bestOverall, stem, bestWasm, bestJs, bestF32)}),
-    layout: bestWasm.layout,
-    zipBytes: bestWasm.zipBytes,
-    remaining: budget - bestWasm.zipBytes,
+    selected: bestOverall.id,
+    selectedWasm: candidateSummary({...bestWasm, reportArchive: finalArchiveFor(bestWasm, stem, bestOverall)}),
+    selectedJs: candidateSummary({...bestJs, reportArchive: finalArchiveFor(bestJs, stem, bestOverall)}),
+    selectedF32: bestF32 ? candidateSummary(bestF32) : null,
+    selectedOverall: candidateSummary({...bestOverall, reportArchive: `${stem}.zip`}),
+    layout: bestOverall.layout,
+    zipBytes: bestOverall.zipBytes,
+    remaining: budget - bestOverall.zipBytes,
     artifacts,
     skippedCandidates,
     searchStages: searchStages.map(({pass, axis, before, after, trials}) => ({
@@ -445,7 +475,7 @@ async function finishBuild({options, sourceText, staging, stem, title, python, z
     })),
     candidates: records.map((candidate) => candidateSummary({
       ...candidate,
-      reportArchive: finalArchiveFor(candidate, stem, bestWasm, bestJs, bestF32),
+      reportArchive: finalArchiveFor(candidate, stem, bestOverall),
     })),
   };
   await writeFile(join(staging, `${stem}.size.json`), `${JSON.stringify(report, null, 2)}\n`);
@@ -456,17 +486,17 @@ async function finishBuild({options, sourceText, staging, stem, title, python, z
     `${stem}.html`,
     `${stem}.size.json`,
     `${stem}.js`,
+    `${stem}.min.js`,
     `${stem}.js.html`,
-    `${stem}.js.zip`,
     `${stem}.zip`,
   ];
-  if (bestF32) finalNames.splice(7, 0, `${stem}.f32.js`, `${stem}.f32.html`, `${stem}.f32.zip`);
+  if (bestF32) finalNames.splice(7, 0, `${stem}.f32.js`, `${stem}.f32.min.js`, `${stem}.f32.html`);
   await mkdir(options.output, {recursive: true});
   for (const name of finalNames) await copyFile(join(staging, name), join(options.output, name));
   await removeObsoleteArtifacts(options.output, stem, options.compareF32);
   console.log(JSON.stringify(report, null, 2));
-  if (bestWasm.zipBytes > budget) process.exitCode = 1;
-  if (options.check && process.exitCode) throw new Error('Selected WASM package exceeds the size budget');
+  if (bestOverall.zipBytes > budget) process.exitCode = 1;
+  if (options.check && process.exitCode) throw new Error('Selected package exceeds the size budget');
 }
 
 async function main() {
@@ -689,7 +719,8 @@ async function buildInStagingStaged(options, sourceText, staging) {
     if (cached) return cached;
 
     const module = await getWasmModule(variant, profile.name);
-    const unminified = makeHtml(module.bytes, {
+    const shippingBytes = minifyWasmInterface(module.bytes);
+    const unminified = makeHtml(shippingBytes, {
       title,
       keyboardOnly: options.keyboardOnly,
       soundPacking,
@@ -717,7 +748,7 @@ async function buildInStagingStaged(options, sourceText, staging) {
         output: archivePath,
         stem,
         html: htmlVariant.html,
-        wasm: settings.layout === 'external' ? module.bytes : undefined,
+        wasm: settings.layout === 'external' ? shippingBytes : undefined,
       });
       const candidate = {
         id,
@@ -733,11 +764,13 @@ async function buildInStagingStaged(options, sourceText, staging) {
         triangles: variant.triangleVariant,
         'integer-arrays': variant.integerArrayStorage,
         sound: soundPacking,
-        wasmBytes: module.bytes.length,
+        wasmBytes: shippingBytes.length,
+        unminifiedWasmBytes: module.bytes.length,
+        interfaceMinified: true,
         htmlBytes: Buffer.byteLength(htmlVariant.html),
         zipBytes,
         archive,
-        bytes: module.bytes,
+        bytes: shippingBytes,
         html: htmlVariant.html,
         detailed: module.detailed,
       };
@@ -771,10 +804,6 @@ async function buildInStagingStaged(options, sourceText, staging) {
         choices: (current) => optimizerProfiles
           .map((profile) => profile.name)
           .filter((name) => name !== current.optimization),
-      },
-      {
-        name: 'layout',
-        choices: (current) => ['external', 'embedded'].filter((layout) => layout !== current.layout),
       },
       {
         name: 'triangles',
@@ -941,10 +970,11 @@ async function buildInStaging(options, sourceText, staging) {
       }
 
       for (const module of wasmModules) {
+        const shippingBytes = minifyWasmInterface(module.bytes);
         const soundModes = soundModesFor(module.detailed.imports, options.soundPacking);
-        for (const layout of ['embedded', 'external']) {
+        for (const layout of ['external']) {
           for (const soundPacking of soundModes) {
-            const unminified = makeHtml(module.bytes, {
+            const unminified = makeHtml(shippingBytes, {
               title,
               keyboardOnly: options.keyboardOnly,
               soundPacking,
@@ -971,7 +1001,7 @@ async function buildInStaging(options, sourceText, staging) {
                 output: archivePath,
                 stem,
                 html: variant.html,
-                wasm: layout === 'external' ? module.bytes : undefined,
+                wasm: layout === 'external' ? shippingBytes : undefined,
               });
               records.push({
                 id,
@@ -984,11 +1014,13 @@ async function buildInStaging(options, sourceText, staging) {
                 packedTriangleArrays: module.packedTriangleArrays.slice(),
                 soundPacking,
                 integerArrayStorage: module.integerArrayStorage,
-                wasmBytes: module.bytes.length,
+                wasmBytes: shippingBytes.length,
+                unminifiedWasmBytes: module.bytes.length,
+                interfaceMinified: true,
                 htmlBytes: Buffer.byteLength(variant.html),
                 zipBytes,
                 archive,
-                bytes: module.bytes,
+                bytes: shippingBytes,
                 html: variant.html,
                 detailed: module.detailed,
               });

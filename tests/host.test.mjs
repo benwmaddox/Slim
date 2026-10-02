@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {compile} from '../src/compiler.mjs';
 import {makeHtml, makeJavaScriptHtml} from '../src/host.mjs';
+import {minifyWasmInterface} from '../tools/wasm-interface.mjs';
 
 const inputSource = 'fn init() {} fn frame() { input(0); }';
 const soundSource = 'fn init() {} fn frame() { sound(0, 0, 0); }';
@@ -76,9 +77,14 @@ async function bootPage(page, {audio = false, javascript = false} = {}) {
       return canvas;
     }},
     WebAssembly: {
-      instantiate(_bytes, imports) {
+      instantiate(bytes, imports) {
         capturedImports = imports;
-        return Promise.resolve({instance: {exports: {init() {}, frame() {}}}});
+        const module = new globalThis.WebAssembly.Module(bytes);
+        const exports = Object.fromEntries(globalThis.WebAssembly.Module.exports(module).map(({name, kind}) => [
+          name,
+          kind === 'function' ? () => {} : {},
+        ]));
+        return Promise.resolve({instance: {exports}});
       }
     },
     atob: globalThis.atob,
@@ -210,6 +216,33 @@ test('zero-gain sound does not construct audio or oscillator nodes', async () =>
     host.imports.e.sound(0, 0, 0.5);
     assert.deepEqual(host.audioStats, {contexts: 1, oscillators: 1});
   }
+});
+
+test('shipping WASM interface shortens imports and exports without changing compiler output', async () => {
+  const original = compile(inputSource);
+  const originalModule = new WebAssembly.Module(original);
+  assert.deepEqual(WebAssembly.Module.exports(originalModule).map(({name, kind}) => [name, kind]), [
+    ['init', 'function'],
+    ['frame', 'function'],
+    ['memory', 'memory'],
+  ]);
+
+  const compact = minifyWasmInterface(original);
+  assert.ok(WebAssembly.validate(compact));
+  const compactModule = new WebAssembly.Module(compact);
+  assert.deepEqual(WebAssembly.Module.imports(compactModule).map(({module, name, kind}) => [module, name, kind]), [
+    ['e', 'c', 'function'],
+  ]);
+  assert.deepEqual(WebAssembly.Module.exports(compactModule).map(({name, kind}) => [name, kind]), [
+    ['a', 'function'],
+    ['b', 'function'],
+  ]);
+
+  const host = await bootPage(makeHtml(compact, {title: 'compact interface'}));
+  assert.equal(typeof host.imports.e.c, 'function');
+  host.dispatchGlobal('keydown', keyboard('ArrowRight'));
+  assert.equal(host.imports.e.c(1), 1);
+  host.tick();
 });
 
 test('sound packing modes preserve exact ten-voice WebAudio schedules', async () => {

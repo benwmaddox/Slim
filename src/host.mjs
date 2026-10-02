@@ -8,6 +8,20 @@
 
 const MATH_BUILTINS = ['sin', 'cos', 'atan2', 'pow'];
 const BUILTINS = new Set(['tri', 'sound', 'input', 'text', ...MATH_BUILTINS]);
+export const MINIFIED_WASM_IMPORT_NAMES = Object.freeze({
+  tri: 'a',
+  sound: 'b',
+  input: 'c',
+  text: 'd',
+  sin: 'e',
+  cos: 'f',
+  atan2: 'g',
+  pow: 'h',
+});
+export const MINIFIED_WASM_EXPORT_NAMES = Object.freeze({init: 'a', frame: 'b'});
+const ORIGINAL_WASM_IMPORT_NAMES = Object.freeze(Object.fromEntries(
+  Object.entries(MINIFIED_WASM_IMPORT_NAMES).map(([name, compactName]) => [compactName, name])
+));
 const SOUND_PACKINGS = new Set(['none', 'numbers', 'bytes']);
 const SOUND_PRESETS = Object.freeze([
   Object.freeze([Object.freeze([0, 7, 0, .14, 1, .85])]),
@@ -184,25 +198,32 @@ function html(value) {
 
 function scanImports(wasm) {
   let source;
+  let exports;
   try {
-    source = WebAssembly.Module.imports(new WebAssembly.Module(wasm));
+    const module = new WebAssembly.Module(wasm);
+    source = WebAssembly.Module.imports(module);
+    exports = WebAssembly.Module.exports(module);
   } catch (error) {
     throw new TypeError(`wasmBytes must be a valid WASM module: ${error.message}`);
   }
+  const compactExportNames = new Set(Object.values(MINIFIED_WASM_EXPORT_NAMES));
+  const minifiedInterface = exports.length === compactExportNames.size &&
+    exports.every(({name, kind}) => kind === 'function' && compactExportNames.has(name));
   const used = new Set();
   const modules = new Set();
   for (const descriptor of source) {
+    const name = minifiedInterface ? ORIGINAL_WASM_IMPORT_NAMES[descriptor.name] : descriptor.name;
     if (descriptor.kind !== 'function') {
       throw new Error(`Unsupported WASM import ${descriptor.module}.${descriptor.name} (${descriptor.kind})`);
     }
-    if (descriptor.module !== 'e' || !BUILTINS.has(descriptor.name)) {
+    if (descriptor.module !== 'e' || !BUILTINS.has(name)) {
       throw new Error(`Unsupported WASM import ${descriptor.module}.${descriptor.name}`);
     }
-    used.add(descriptor.name);
+    used.add(name);
     modules.add(descriptor.module);
   }
 
-  return { used, modules };
+  return { used, modules, minifiedInterface };
 }
 
 function scanJavaScriptImports(source) {
@@ -456,7 +477,7 @@ addEventListener('blur', function () {
 ${pointerEvents}`;
 }
 
-function makeRuntime({ used, modules, boot, keyboardOnly = false, soundPacking = 'none' }) {
+function makeRuntime({ used, modules, boot, keyboardOnly = false, soundPacking = 'none', minifiedInterface = false }) {
   const pieces = [];
   if (used.has('tri')) pieces.push(triangleHost());
   if (used.has('sound')) pieces.push(soundHost(soundPacking));
@@ -466,15 +487,18 @@ function makeRuntime({ used, modules, boot, keyboardOnly = false, soundPacking =
   const imports = [];
   for (const module of modules) imports.push(`I[${JSON.stringify(module)}]=E`);
   const e = [];
-  if (used.has('tri')) e.push('tri:tri');
-  if (used.has('sound')) e.push('sound:sound');
-  if (used.has('input')) e.push('input:input');
-  if (used.has('text')) e.push('text:text');
-  for (const name of MATH_BUILTINS) if (used.has(name)) e.push(`${name}:Math.${name}`);
+  const importKey = (name) => minifiedInterface ? MINIFIED_WASM_IMPORT_NAMES[name] : name;
+  if (used.has('tri')) e.push(`${importKey('tri')}:tri`);
+  if (used.has('sound')) e.push(`${importKey('sound')}:sound`);
+  if (used.has('input')) e.push(`${importKey('input')}:input`);
+  if (used.has('text')) e.push(`${importKey('text')}:text`);
+  for (const name of MATH_BUILTINS) if (used.has(name)) e.push(`${importKey(name)}:Math.${name}`);
   const setupGpu = used.has('tri') ? 'gpu()' : '';
   const draw = used.has('tri') ? 'draw()' : '';
   const clear = (used.has('tri') ? 'v.length=0;' : '') + (used.has('text') ? 'q.clearRect(0,0,800,600);' : '');
   const inputTick = used.has('input') ? 'pressed=restart=menu=0;' : '';
+  const init = minifiedInterface ? `g[${JSON.stringify(MINIFIED_WASM_EXPORT_NAMES.init)}]()` : 'g.init()';
+  const frame = minifiedInterface ? `g[${JSON.stringify(MINIFIED_WASM_EXPORT_NAMES.frame)}]()` : 'g.frame()';
   const audioUnlock = used.has('sound')
     ? keyboardOnly ? 'addEventListener("keydown",unlock)' : 'addEventListener("keydown",unlock);addEventListener("pointerdown",unlock)'
     : '';
@@ -488,7 +512,7 @@ function makeRuntime({ used, modules, boot, keyboardOnly = false, soundPacking =
   ${audioUnlock};
   function start(g) {
     ${setupGpu}
-    g.init();
+    ${init};
     ${draw}
     var d = 1000 / 60, a = 0, p = performance.now();
     function f(t) {
@@ -497,7 +521,7 @@ function makeRuntime({ used, modules, boot, keyboardOnly = false, soundPacking =
       var n = Math.min(5, a / d | 0);
       for (var i = 0; i < n; i++) {
         ${clear}
-        g.frame();
+        ${frame};
         ${inputTick}
       }
       a -= n * d;
@@ -520,13 +544,13 @@ function makeRuntime({ used, modules, boot, keyboardOnly = false, soundPacking =
 export function makeHtml(wasmBytes, options = {}) {
   const soundPacking = normalizeSoundPacking(options.soundPacking);
   const bytes = bytesOf(wasmBytes);
-  const { used, modules } = scanImports(bytes);
+  const { used, modules, minifiedInterface } = scanImports(bytes);
   const title = html(options.title);
   const keyboardOnly = options.keyboardOnly === true;
   const boot = options.wasmUrl == null
     ? `var z=atob('${base64(bytes)}'),w=new Uint8Array(z.length),j=0;for(;j<z.length;j++)w[j]=z.charCodeAt(j);WebAssembly.instantiate(w,I).then(function(x){return x.instance.exports})`
     : `fetch(${JSON.stringify(options.wasmUrl).replace(/</g, '\\u003c')}).then(function(r){if(!r.ok)throw Error('WASM '+r.status);return r.arrayBuffer()}).then(function(w){return WebAssembly.instantiate(w,I)}).then(function(x){return x.instance.exports})`;
-  const runtime = makeRuntime({ used, modules, boot, keyboardOnly, soundPacking });
+  const runtime = makeRuntime({ used, modules, boot, keyboardOnly, soundPacking, minifiedInterface });
   return page(title, runtime, keyboardOnly, options.footer, options.texts, used);
 }
 

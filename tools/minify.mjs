@@ -21,3 +21,18 @@ export async function minifyHtml(html) {
   return html.slice(0, script.index) + '<script>' + code + '</script>' +
     html.slice(script.index + script[0].length);
 }
+
+export function inlineScriptSource(html) {
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+  if (scripts.length !== 1) throw Error('Expected one inline game script');
+  return scripts[0][1];
+}
+
+export function externalizeInlineScript(html, source) {
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+  if (scripts.length !== 1) throw Error('Expected one inline game script');
+  const escapedSource = String(source).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  const script = scripts[0];
+  return html.slice(0, script.index) + `<script src="${escapedSource}"></script>` +
+    html.slice(script.index + script[0].length);
+}

@@ -1,9 +1,10 @@
 import {createServer} from 'node:http';
 import {existsSync} from 'node:fs';
-import {mkdir, readFile, readdir, stat, writeFile} from 'node:fs/promises';
+import {mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises';
 import {execFileSync} from 'node:child_process';
 import {basename, dirname, extname, isAbsolute, join, resolve} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
+import {tmpdir} from 'node:os';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -134,7 +135,10 @@ async function openServer(directory, entry) {
         return;
       }
       const bytes = await readFile(file);
-      const type = extname(file) === '.html' ? 'text/html; charset=utf-8' : extname(file) === '.wasm' ? 'application/wasm' : 'application/octet-stream';
+      const extension = extname(file);
+      const type = extension === '.html' ? 'text/html; charset=utf-8'
+        : extension === '.wasm' ? 'application/wasm'
+          : extension === '.js' ? 'text/javascript; charset=utf-8' : 'application/octet-stream';
       response.writeHead(200, {'content-type': type, 'cache-control': 'no-store'}).end(bytes);
     } catch {
       if (request.url === '/favicon.ico') {
@@ -389,6 +393,18 @@ async function runBrowser(name, playwright, url, screenshot) {
     assertBrowser(pixel.error === 0, `${name} WebGL readPixels error ${pixel.error}`);
     assertBrowser(pixel.pixel.some((channel) => channel !== 0), `${name} rendered an all-zero center pixel`);
 
+    if (stem === 'boxpush') {
+      await page.screenshot({path: screenshot, fullPage: true});
+      await page.keyboard.press('ArrowRight');
+      await page.waitForTimeout(100);
+      const afterInput = await frameStats(page);
+      assertBrowser(afterInput.finite && afterInput.triangles > 0, `${name} stopped rendering after keyboard input`);
+      if (errors.length) fail(errors.join('; '));
+      if (failedRequests.length) fail(`failed requests: ${failedRequests.join('; ')}`);
+      return {name, status: 'passed', version: browser.version(), executablePath, url, screenshot,
+        initialTriangles: initial.triangles, finalTriangles: afterInput.triangles, keyboardInput: true};
+    }
+
     const beforeMove = initial.cyanX;
     assertBrowser(beforeMove !== null, `${name} initial frame has no player triangle`);
     await page.keyboard.down('ArrowRight');
@@ -462,17 +478,34 @@ function assertBrowser(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-function verifyArchive(htmlPath, zipPath, wasmName) {
+function verifyArchive(htmlPath, zipPath, payloadName, payloadPath, stem, javascript) {
   const script = `import json,pathlib,sys,zipfile
-p=pathlib.Path(sys.argv[1]); h=pathlib.Path(sys.argv[2]); w=sys.argv[3]
+p=pathlib.Path(sys.argv[1]); h=pathlib.Path(sys.argv[2]); n=sys.argv[3]; payload=pathlib.Path(sys.argv[4]); stem=sys.argv[5]; js=sys.argv[6]=='1'
 with zipfile.ZipFile(p) as z:
  names=sorted(z.namelist())
- assert names==['index.html'] or (w and names==sorted(['index.html',w])), names
- assert z.read('index.html')==h.read_bytes(), 'HTML differs from ZIP'
- if w in names: assert z.read(w)==(h.parent/w).read_bytes(), 'WASM differs from ZIP'
+ assert names==sorted(['index.html',n]), names
+ expected=h.read_bytes()
+ if js:
+  old=('<script src="'+stem+'.min.js"></script>').encode(); new=('<script src="'+stem+'.js"></script>').encode()
+  assert expected.count(old)==1, 'inspectable HTML must reference the external minified script once'
+  expected=expected.replace(old,new)
+ assert z.read('index.html')==expected, 'archive HTML differs from inspectable page after payload aliasing'
+ assert z.read(n)==payload.read_bytes(), 'archive payload differs from inspectable payload'
  print(json.dumps(names))`;
   return JSON.parse(execFileSync(process.env.SLIM_PYTHON || 'python',
-    ['-c', script, zipPath, htmlPath, wasmName], {encoding: 'utf8'}));
+    ['-c', script, zipPath, htmlPath, payloadName, payloadPath, stem, javascript ? '1' : '0'], {encoding: 'utf8'}));
+}
+
+function extractArchive(zipPath, directory, payloadName) {
+  const script = `import pathlib,sys,zipfile
+p=pathlib.Path(sys.argv[1]); d=pathlib.Path(sys.argv[2]); n=sys.argv[3]
+with zipfile.ZipFile(p) as z:
+ names=sorted(z.namelist())
+ assert names==sorted(['index.html',n]), names
+ for name in names:
+  assert pathlib.PurePosixPath(name).name==name, 'archive path must be a flat filename'
+  (d/name).write_bytes(z.read(name))`;
+  execFileSync(process.env.SLIM_PYTHON || 'python', ['-c', script, zipPath, directory, payloadName], {encoding: 'utf8'});
 }
 
 async function main() {
@@ -486,19 +519,45 @@ async function main() {
     coverageComplete: false
   };
   let server;
+  let archiveServer;
+  let archiveDirectory;
   try {
     const playwright = await loadPlaywright();
     const opened = await openServer(dist, `${stem}.html`);
     server = opened.server;
+    const report = summary.comparison;
+    if (!report?.selectedOverall || report.selectedOverall.archive !== `${stem}.zip`) fail('Missing winner-only package report; run npm run build first');
+    const selectedJs = report.selectedOverall.backend === 'js';
+    const archivePage = selectedJs ? `${stem}.js.html` : `${stem}.html`;
+    const archivePayloadName = selectedJs ? `${stem}.js` : `${stem}.wasm`;
+    const inspectablePayload = selectedJs ? `${stem}.min.js` : `${stem}.wasm`;
+    const archivePath = join(dist, `${stem}.zip`);
+    const packageEntries = verifyArchive(join(dist, archivePage), archivePath, archivePayloadName,
+      join(dist, inspectablePayload), stem, selectedJs);
+    summary.package = {backend: report.selectedOverall.backend, layout: report.selectedOverall.layout,
+      zip: archivePath, zipBytes: (await stat(archivePath)).size, entries: packageEntries, browsers: {}};
+    archiveDirectory = await mkdtemp(join(tmpdir(), 'slim-browser-archive-'));
+    extractArchive(archivePath, archiveDirectory, archivePayloadName);
+    const extracted = await openServer(archiveDirectory, 'index.html');
+    archiveServer = extracted.server;
+    for (const browserName of requestedBrowsers) {
+      const screenshot = join(output, `package-${browserName}.png`);
+      if (!['chromium', 'firefox'].includes(browserName)) {
+        summary.package.browsers[browserName] = {status: 'unavailable', reason: `Unsupported browser: ${browserName}`};
+      } else {
+        summary.package.browsers[browserName] = await runBrowser(browserName, playwright, extracted.url, screenshot);
+      }
+      const browser = summary.package.browsers[browserName];
+      console.log(`package ${browserName}: ${browser.status}${browser.version ? ` (${browser.version})` : ''}${browser.reason ? ` — ${browser.reason}` : ''}`);
+    }
     for (const profile of requestedProfiles) {
       if (!Object.hasOwn(profileSuffix, profile)) fail(`Unknown profile: ${profile}`);
       const name = `${stem}${profileSuffix[profile]}`;
       const htmlPath = join(dist, `${name}.html`);
-      const zipPath = join(dist, `${name}.zip`);
-      if (!existsSync(htmlPath) || !existsSync(zipPath)) fail(`Missing ${name} output; run npm run build first`);
-      const entries = verifyArchive(htmlPath, zipPath, profile === 'wasm' ? `${stem}.wasm` : '');
+      const sidecar = profile === 'wasm' ? null : profile === 'js-native' ? `${stem}.min.js` : `${stem}.f32.min.js`;
+      if (!existsSync(htmlPath) || sidecar && !existsSync(join(dist, sidecar))) fail(`Missing ${name} output; run npm run build first`);
       const result = summary.profiles[profile] = {
-        artifact: {html: htmlPath, zip: zipPath, zipBytes: (await stat(zipPath)).size, entries},
+        artifact: {html: htmlPath, script: sidecar ? join(dist, sidecar) : null},
         browsers: {}
       };
       const url = new URL(encodeURIComponent(`${name}.html`), opened.url).href;
@@ -519,8 +578,13 @@ async function main() {
     process.exitCode = 1;
   } finally {
     if (server) await new Promise((resolvePromise) => server.close(resolvePromise));
+    if (archiveServer) await new Promise((resolvePromise) => archiveServer.close(resolvePromise));
+    if (archiveDirectory) await rm(archiveDirectory, {recursive: true, force: true});
   }
-  const results = Object.values(summary.profiles).flatMap(profile => Object.values(profile.browsers));
+  const results = [
+    ...Object.values(summary.profiles).flatMap(profile => Object.values(profile.browsers)),
+    ...Object.values(summary.package?.browsers ?? {}),
+  ];
   summary.coverageComplete = !summary.error && results.length > 0 && results.every(result => result.status === 'passed');
   await writeFile(join(output, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
   console.log(`Summary: ${join(output, 'summary.json')}`);
