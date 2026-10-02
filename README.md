@@ -154,7 +154,7 @@ pointed cap, chamfered menu cards with triangular cursor brackets, five-pointed
 stars made of ten triangles, large slow shards drifting behind the board, and a
 pool of 56 spinning shards thrown out when a crate is pushed, lands on a target,
 or a level is cleared. In the test measurements a playing frame is roughly 57%
-rectangles, 10% diamonds and 33% free triangles, and a cleared level about 44%
+rectangles, 10% diamonds and 33% lone triangles, and a cleared level about 42%
 triangles. Game state changes instantly; the
 animation timers only decide how far drawing lags behind, so input is never
 delayed.
