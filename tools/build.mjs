@@ -143,16 +143,20 @@ function parseArgs(argv) {
 }
 
 // A game names its own page title and control hint with comment lines such as
-// `// title: Crate Shift` and `// footer: Arrows: move`. The command line
-// options override them, and the host supplies defaults when neither is given.
+// `// title: Crate Shift` and `// footer: Arrows: move`. Each `// text: ...`
+// line becomes `<template id=t0>`, `t1`, ... for the `text` builtin. The command line
+// options override title and footer, and the host supplies defaults when neither is given.
 function pageText(sourceText, stem, options = {}) {
   const meta = {};
-  for (const match of sourceText.matchAll(/^[ \t]*\/\/[ \t]*(title|footer):[ \t]*(.*?)[ \t]*\r?$/gm)) {
-    if (match[2] && !(match[1] in meta)) meta[match[1]] = match[2];
+  const texts = [];
+  for (const match of sourceText.matchAll(/^[ \t]*\/\/[ \t]*(title|footer|text):[ \t]*(.*?)[ \t]*\r?$/gm)) {
+    if (match[1] === 'text') texts.push(match[2]);
+    else if (match[2] && !(match[1] in meta)) meta[match[1]] = match[2];
   }
   return {
     title: options.title ?? meta.title ?? titleFor(stem),
     footer: options.footer ?? meta.footer,
+    texts,
   };
 }
 
@@ -317,7 +321,7 @@ function finalArchiveFor(candidate, stem, bestWasm, bestJs, bestF32) {
 
 async function finishBuild({options, sourceText, staging, stem, title, python, zipTool, optimizer, records, skippedCandidates, searchStages}) {
   const select = (items) => items.slice().sort(candidateCompare)[0];
-  const {footer} = pageText(sourceText, stem, options);
+  const {footer, texts} = pageText(sourceText, stem, options);
   const profiles = [{name: 'js', precision: 'native'}];
   if (options.compareF32) profiles.push({name: 'f32', precision: 'f32'});
   for (const profile of profiles) {
@@ -331,6 +335,7 @@ async function finishBuild({options, sourceText, staging, stem, title, python, z
         keyboardOnly: options.keyboardOnly,
         soundPacking,
         footer,
+        texts,
       });
       const htmlVariants = [
         {suffix: '', html: unminified, minified: false},
@@ -483,7 +488,7 @@ async function main() {
 
 async function buildInStagingStaged(options, sourceText, staging) {
   const stem = safeStem(options.source);
-  const {title, footer} = pageText(sourceText, stem, options);
+  const {title, footer, texts} = pageText(sourceText, stem, options);
   const python = process.env.SLIM_PYTHON || 'python';
   const zipTool = resolve(root, 'tools/zip.py');
   const records = [];
@@ -689,6 +694,7 @@ async function buildInStagingStaged(options, sourceText, staging) {
       keyboardOnly: options.keyboardOnly,
       soundPacking,
       footer,
+      texts,
       ...(settings.layout === 'external' ? {wasmUrl: `${stem}.wasm`} : {}),
     });
     const htmlVariants = [
@@ -817,7 +823,7 @@ async function buildInStagingStaged(options, sourceText, staging) {
 
 async function buildInStaging(options, sourceText, staging) {
   const stem = safeStem(options.source);
-  const {title, footer} = pageText(sourceText, stem, options);
+  const {title, footer, texts} = pageText(sourceText, stem, options);
   const python = process.env.SLIM_PYTHON || 'python';
   const zipTool = resolve(root, 'tools/zip.py');
   const records = [];
@@ -943,6 +949,7 @@ async function buildInStaging(options, sourceText, staging) {
               keyboardOnly: options.keyboardOnly,
               soundPacking,
               footer,
+              texts,
               ...(layout === 'external' ? {wasmUrl: `${stem}.wasm`} : {}),
             });
             const variants = [

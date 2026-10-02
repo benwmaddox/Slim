@@ -2,7 +2,7 @@ import {compileDetailed, parseProgram, INTRINSICS, MATH_IMPORTS} from "./compile
 
 const SVG_METADATA_BUILTIN = "svg_group";
 const SVG_TRI_BUILTIN = "svg_tri";
-const BUILTIN_NAMES = new Set(["tri", "sound", "input", SVG_METADATA_BUILTIN, SVG_TRI_BUILTIN]);
+const BUILTIN_NAMES = new Set(["tri", "sound", "input", "text", SVG_METADATA_BUILTIN, SVG_TRI_BUILTIN]);
 
 function safeName(name) {
   return name.replace(/[^A-Za-z0-9_$]/g, "_");

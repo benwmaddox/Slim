@@ -50,17 +50,20 @@ fn frame() {
     i = i + 1;
   }
   sound(96, sum, best_moves[current_level]);
+  sound(95, cursor, unlocked);
 }`;
 }
 
-function makeRuntime(backend = 'wasm') {
+function makeRuntime(backend = 'wasm', options = {}) {
   let values = {};
   let triangles = [];
   let sounds = [];
+  let texts = [];
   const host = {
     input(index) { return values[index] ?? 0; },
     tri(...args) { triangles.push(args); return 0; },
     sound(...args) { sounds.push(args); return 0; },
+    text(...args) { texts.push(args); return 0; },
   };
   const code = instrumented();
   let game;
@@ -76,6 +79,7 @@ function makeRuntime(backend = 'wasm') {
     values = next;
     triangles = [];
     sounds = [];
+    texts = [];
     game.frame();
     const find = (id) => sounds.find((event) => event[0] === id);
     return {
@@ -89,10 +93,13 @@ function makeRuntime(backend = 'wasm') {
       stars: find(97)[2],
       crates: find(96)[1],
       best: find(96)[2],
+      cursor: find(95)[1],
+      unlocked: find(95)[2],
+      texts: texts.map((entry) => entry.slice()),
     };
   }
   game.init();
-  return {
+  const runtime = {
     frame,
     // One keypress: key down for a frame, then released, like a real tap.
     tap(dir) {
@@ -104,7 +111,17 @@ function makeRuntime(backend = 'wasm') {
     wait(ticks) { let last; for (let i = 0; i < ticks; i += 1) last = frame(); return last; },
     space() { return frame({4: 1, 5: 1}); },
     restart() { return frame({9: 1}); },
+    menuKey() { return frame({10: 1}); },
+    // Arrow press and release in the menu.
+    menuMove(dir) {
+      const input = {left: 0, right: 1, up: 2, down: 3}[dir];
+      frame({[input]: 1});
+      return frame();
+    },
   };
+  // The game opens on the level menu; most tests start from level 1.
+  if (!options.menu) runtime.space();
+  return runtime;
 }
 
 test('every level is fenced in, has matching boxes and targets, and counts boxes', () => {
@@ -164,10 +181,10 @@ for (const backend of ['wasm', 'native', 'f32']) {
         assert.equal(frame.state, 2, 'finishing level 6 shows the win screen');
       }
     });
-    // Space (or R) on the win screen starts over.
+    // Space (or R) on the win screen goes back to the level menu.
     const again = runtime.space();
-    assert.equal(again.level, 0);
-    assert.equal(again.state, 0);
+    assert.equal(again.state, 3);
+    assert.equal(again.cursor, 0);
   });
 }
 
@@ -436,4 +453,106 @@ test('frames stay light enough to run at 60 Hz', () => {
   console.log(`most triangles in a frame: ${most}; ${frames} frames in ${millis.toFixed(0)} ms (${(millis / frames).toFixed(3)} ms/frame including the test host)`);
   assert.ok(most <= 2500);
   assert.ok(millis / frames < 5, 'well under the 16.7 ms frame budget');
+});
+
+// ---- Level select -------------------------------------------------------
+
+const textIds = (frame) => frame.texts.map((entry) => entry[0]);
+
+test('the game opens on a level menu with only level 1 unlocked', () => {
+  const runtime = makeRuntime('wasm', {menu: true});
+  const first = runtime.wait(60);
+  assert.equal(first.state, 3);
+  assert.equal(first.cursor, 0);
+  assert.equal(first.unlocked, 1);
+  const ids = textIds(first);
+  assert.ok(ids.includes(0) && ids.includes(1), 'title and heading');
+  assert.ok(ids.includes(2), 'Level 1 is open');
+  assert.equal(ids.filter((id) => id === 8).length, 5, 'five locked cards say Locked');
+  assert.ok(first.texts.every((entry) => entry.length === 5 && entry.every(Number.isFinite)), 'text(id, x, y, size, tone)');
+});
+
+test('arrows move the cursor and Space on a locked level does nothing', () => {
+  const runtime = makeRuntime('wasm', {menu: true});
+  runtime.wait(60);
+  assert.equal(runtime.menuMove('left').cursor, 0, 'cannot go left of the first card');
+  assert.equal(runtime.menuMove('up').cursor, 0);
+  assert.equal(runtime.menuMove('right').cursor, 1);
+  assert.equal(runtime.menuMove('right').cursor, 2);
+  assert.equal(runtime.menuMove('right').cursor, 3, 'right continues onto the next row, in reading order');
+  assert.equal(runtime.menuMove('down').cursor, 3, 'nothing below the last row');
+  assert.equal(runtime.menuMove('right').cursor, 4);
+  assert.equal(runtime.menuMove('up').cursor, 1, 'up moves one row of three');
+  assert.equal(runtime.menuMove('up').cursor, 1);
+  assert.equal(runtime.menuMove('down').cursor, 4);
+  for (let i = 0; i < 4; i += 1) runtime.menuMove('right');
+  assert.equal(runtime.menuMove('right').cursor, 5, 'stops at the last card');
+  const locked = runtime.space();
+  assert.equal(locked.state, 3, 'a locked level stays in the menu');
+  assert.equal(locked.level, 0);
+});
+
+test('Space on an unlocked level opens it, and holding an arrow moves only once', () => {
+  const runtime = makeRuntime('wasm', {menu: true});
+  runtime.wait(60);
+  assert.equal(runtime.frame({1: 1}).cursor, 1);
+  for (let i = 0; i < 10; i += 1) assert.equal(runtime.frame({1: 1}).cursor, 1, 'held arrow does not repeat');
+  runtime.frame();
+  runtime.menuMove('left');
+  const opened = runtime.space();
+  assert.equal(opened.state, 0);
+  assert.equal(opened.level, 0);
+});
+
+test('clearing a level unlocks the next and Esc or M returns to the menu', () => {
+  const runtime = makeRuntime('wasm');
+  runtime.wait(60);
+  for (const dir of solve(levels[0]).moves) runtime.tap(dir);
+  const cleared = runtime.wait(CLEAR_READY + 2);
+  assert.equal(cleared.state, 1);
+  assert.equal(cleared.unlocked, 2, 'level 2 is unlocked');
+  const menu = runtime.menuKey();
+  assert.equal(menu.state, 3);
+  assert.equal(menu.cursor, 1, 'the cursor is on the newly unlocked level');
+  runtime.wait(60);
+  const opened = runtime.space();
+  assert.equal(opened.state, 0);
+  assert.equal(opened.level, 1);
+  // Esc during play also leads back, with the cursor on the level being played.
+  runtime.wait(5);
+  const back = runtime.menuKey();
+  assert.equal(back.state, 3);
+  assert.equal(back.cursor, 1);
+  const labels = textIds(runtime.wait(60));
+  assert.equal(labels.filter((id) => id === 8).length, 4, 'four levels are still locked');
+});
+
+test('cards show the best stars and moves earned', () => {
+  const runtime = makeRuntime('wasm');
+  runtime.wait(60);
+  for (const dir of solve(levels[0]).moves) runtime.tap(dir);
+  runtime.wait(CLEAR_READY);
+  runtime.menuKey();
+  const frame = runtime.wait(80);
+  const green = frame.triangles.filter((t) => Math.abs(t[6] - 0.97) < 0.01 && Math.abs(t[7] - 0.78) < 0.01 && Math.abs(t[8] - 0.26) < 0.01);
+  assert.ok(green.length >= 6, 'three gold star diamonds (two triangles each) on the first card');
+});
+
+test('text appears on the clear and win screens and not while playing', () => {
+  const runtime = makeRuntime('wasm');
+  runtime.wait(60);
+  assert.equal(runtime.frame().texts.length, 0, 'no text while playing');
+  levels.forEach((level, n) => {
+    for (const dir of solve(level).moves) runtime.tap(dir);
+    const panel = runtime.wait(CLEAR_READY + 2);
+    assert.ok(textIds(panel).includes(10), `level ${n + 1} says Level cleared`);
+    assert.ok(textIds(panel).includes(11), 'and how to continue');
+    const next = runtime.space();
+    if (n < LEVEL_COUNT - 1) {
+      assert.equal(next.texts.length, 0, 'text clears when the next level starts');
+      runtime.wait(60);
+    } else {
+      assert.ok(textIds(runtime.wait(5)).includes(12), 'the win screen congratulates');
+    }
+  });
 });

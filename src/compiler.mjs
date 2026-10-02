@@ -18,7 +18,7 @@ export const MATH_IMPORTS = Object.freeze({
   atan2: Object.freeze({ params: 2, result: true }),
   pow: Object.freeze({ params: 2, result: true }),
 });
-const BUILTIN_ORDER = ["tri", "sound", "input", SVG_METADATA_BUILTIN, SVG_TRI_BUILTIN, ...Object.keys(MATH_IMPORTS)];
+const BUILTIN_ORDER = ["tri", "sound", "input", SVG_METADATA_BUILTIN, SVG_TRI_BUILTIN, "text", ...Object.keys(MATH_IMPORTS)];
 
 const BUILTINS = Object.freeze({
   tri: Object.freeze({ params: 9, result: true }),
@@ -26,6 +26,8 @@ const BUILTINS = Object.freeze({
   input: Object.freeze({ params: 1, result: true }),
   [SVG_METADATA_BUILTIN]: Object.freeze({ params: 1, result: true }),
   [SVG_TRI_BUILTIN]: Object.freeze({ params: 10, result: true }),
+  // text(id, x, y, size, tone): draws the page's <template id="t<id>"> text.
+  text: Object.freeze({ params: 5, result: true }),
   ...MATH_IMPORTS,
 });
 

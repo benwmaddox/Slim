@@ -1,5 +1,19 @@
 // title: Crate Shift
-// footer: Arrows/WASD: move and push crates · Space: undo · R: restart level
+// footer: Arrows/WASD: move and push crates · Space: undo · R: restart · Esc/M: menu
+// text: Crate Shift
+// text: Select a level
+// text: Level 1
+// text: Level 2
+// text: Level 3
+// text: Level 4
+// text: Level 5
+// text: Level 6
+// text: Locked
+// text: Arrows choose · Space plays
+// text: Level cleared
+// text: Space: next level
+// text: You finished every level!
+// text: Space: back to the menu
 const LEVEL_COUNT = 6;
 const STRIDE = 9;
 const ROWS = 8;
@@ -19,6 +33,7 @@ const DIR_DOWN = 3;
 const STATE_PLAY = 0;
 const STATE_CLEAR = 1;
 const STATE_WON = 2;
+const STATE_MENU = 3;
 
 const INPUT_LEFT = 0;
 const INPUT_RIGHT = 1;
@@ -27,6 +42,7 @@ const INPUT_DOWN = 3;
 const INPUT_ACTION_HELD = 4;
 const INPUT_ACTION_PRESSED = 5;
 const INPUT_RESTART = 9;
+const INPUT_MENU = 10;
 
 const SOUND_STEP = 0;
 const SOUND_LAND = 1;
@@ -53,6 +69,30 @@ const CLEAR_PANEL_DELAY = 20;
 const CLEAR_READY = 44;
 const STAR_POP_TICKS = 16;
 const PUFF_COUNT = 8;
+
+// <template> ids for the text() builtin; see the `// text:` lines above.
+const TEXT_TITLE = 0;
+const TEXT_SELECT = 1;
+const TEXT_LEVEL_FIRST = 2;
+const TEXT_LOCKED = 8;
+const TEXT_MENU_HINT = 9;
+const TEXT_CLEARED = 10;
+const TEXT_NEXT = 11;
+const TEXT_FINISHED = 12;
+const TEXT_BACK = 13;
+
+const TONE_WHITE = 0;
+const TONE_GOLD = 1;
+const TONE_GREEN = 2;
+const TONE_MUTED = 3;
+
+const CARD_W = 200;
+const CARD_H = 140;
+const CARD_COLUMNS = 3;
+const CARD_X0 = 76;
+const CARD_Y0 = 210;
+const CARD_DX = 224;
+const CARD_DY = 172;
 
 // Moves needed for three stars, as a multiple of the reference solution.
 const THREE_STAR_FACTOR = 1.5;
@@ -235,12 +275,19 @@ global repeat = 0;
 global undo_hold = 0;
 global covered = 0;
 global stars = 0;
+global unlocked = 1;
+global cursor = 0;
+global cursor_x = 0;
+global cursor_y = 0;
+global menu_t = 0;
+global locked_t = 0;
 global origin_x = 0;
 global origin_y = 0;
 global view_x = 0;
 global view_y = 0;
 global crate = [0; CELLS];
 global best_moves = [0; LEVEL_COUNT];
+global best_stars = [0; LEVEL_COUNT];
 global hist_dir = [0; HISTORY];
 global hist_push = [0; HISTORY];
 global hist_len = 0;
@@ -391,8 +438,27 @@ fn load_level(level) {
   covered = count_covered();
 }
 
+fn card_x(index) {
+  return CARD_X0 + index % CARD_COLUMNS * CARD_DX;
+}
+
+fn card_y(index) {
+  return CARD_Y0 + floor(index / CARD_COLUMNS) * CARD_DY;
+}
+
+fn enter_menu(level) {
+  state = STATE_MENU;
+  cursor = level;
+  cursor_x = card_x(level);
+  cursor_y = card_y(level);
+  menu_t = 0;
+  locked_t = 0;
+  last_dir = -1;
+}
+
 fn init() {
   load_level(0);
+  enter_menu(0);
 }
 
 fn record(dir, pushed) {
@@ -433,6 +499,8 @@ fn finish_level() {
   if (best_moves[current_level] == 0 || hist_len < best_moves[current_level]) {
     best_moves[current_level] = hist_len;
   }
+  best_stars[current_level] = max(best_stars[current_level], stars);
+  unlocked = max(unlocked, min(current_level + 2, LEVEL_COUNT));
   sound(SOUND_CLEAR, 7, 0.14);
 }
 
@@ -575,6 +643,43 @@ fn update_play() {
   }
 }
 
+fn menu_move(dir) {
+  let to = cursor;
+  if (dir == DIR_LEFT) {
+    to = max(cursor - 1, 0);
+  } else if (dir == DIR_RIGHT) {
+    to = min(cursor + 1, LEVEL_COUNT - 1);
+  } else if (dir == DIR_UP && cursor >= CARD_COLUMNS) {
+    to = cursor - CARD_COLUMNS;
+  } else if (dir == DIR_DOWN && cursor + CARD_COLUMNS < LEVEL_COUNT) {
+    to = cursor + CARD_COLUMNS;
+  }
+  if (to != cursor) {
+    cursor = to;
+    sound(SOUND_STEP, 8, 0.04);
+  }
+}
+
+// Arrows move the cursor one card at a time; Space opens an unlocked level.
+fn update_menu() {
+  let dir = read_dir();
+  if (dir < 0) {
+    last_dir = -1;
+  } else if (dir != last_dir) {
+    last_dir = dir;
+    menu_move(dir);
+  }
+  if (input(INPUT_ACTION_PRESSED) > 0) {
+    if (cursor < unlocked) {
+      load_level(cursor);
+      sound(SOUND_LAND, 10, 0.1);
+    } else {
+      locked_t = BUMP_TICKS;
+      sound(SOUND_BUMP, -6, 0.05);
+    }
+  }
+}
+
 fn advance() {
   if (current_level + 1 >= LEVEL_COUNT) {
     state = STATE_WON;
@@ -594,6 +699,10 @@ fn tick_animation() {
   bump_t = max(bump_t - 1, 0);
   pulse_t = max(pulse_t - 1, 0);
   shake_t = max(shake_t - 1, 0);
+  menu_t = min(menu_t + 1, 200);
+  locked_t = max(locked_t - 1, 0);
+  cursor_x = cursor_x + (card_x(cursor) - cursor_x) * 0.35;
+  cursor_y = cursor_y + (card_y(cursor) - cursor_y) * 0.35;
   if (state == STATE_CLEAR) {
     clear_t = min(clear_t + 1, 1000);
   }
@@ -1023,6 +1132,81 @@ fn sparkles(cx, cy, t) {
   }
 }
 
+fn draw_lock(cx, cy) {
+  quad(cx - 14, cy, 28, 22, 0.5, 0.56, 0.72);
+  quad(cx - 14, cy, 28, 4, 0.7, 0.76, 0.9);
+  quad(cx - 9, cy - 16, 5, 18, 0.5, 0.56, 0.72);
+  quad(cx + 4, cy - 16, 5, 18, 0.5, 0.56, 0.72);
+  quad(cx - 9, cy - 20, 18, 5, 0.5, 0.56, 0.72);
+  quad(cx - 3, cy + 7, 6, 8, 0.12, 0.14, 0.24);
+}
+
+fn draw_card(index) {
+  let age = menu_t - index * 4;
+  if (age >= 0) {
+    let x = card_x(index);
+    let y = card_y(index) + (1 - ease_back(clamp01(age / 18))) * 230;
+    if (index == cursor && locked_t > 0) {
+      let wobble = locked_t * 0.9;
+      if (locked_t % 2 == 1) {
+        wobble = -wobble;
+      }
+      x = x + wobble;
+    }
+    quad(x + 8, y + 12, CARD_W, CARD_H, 0.03, 0.04, 0.08);
+    if (index < unlocked) {
+      quad(x, y, CARD_W, CARD_H, 0.13, 0.2, 0.33);
+      quad(x, y, CARD_W, 6, 0.3, 0.42, 0.62);
+      quad(x, y + CARD_H - 6, CARD_W, 6, 0.08, 0.12, 0.22);
+      text(TEXT_LEVEL_FIRST + index, x + CARD_W / 2, y + 54, 30, TONE_WHITE);
+      let k = 0;
+      while (k < 3) {
+        if (k < best_stars[index]) {
+          diamond(x + 60 + k * 40, y + 84, 15, 0.5, 0.36, 0.1);
+          diamond(x + 60 + k * 40, y + 84, 12, 0.97, 0.78, 0.26);
+        } else {
+          diamond(x + 60 + k * 40, y + 84, 12, 0.08, 0.13, 0.24);
+        }
+        k = k + 1;
+      }
+      if (best_moves[index] > 0) {
+        tri(x + 66, y + 106, x + 66, y + 126, x + 82, y + 116, 0.6, 0.72, 0.95);
+        number(x + 92, y + 103, best_moves[index], 0.8, 0.88, 1);
+      }
+    } else {
+      quad(x, y, CARD_W, CARD_H, 0.08, 0.1, 0.17);
+      quad(x, y, CARD_W, 6, 0.15, 0.18, 0.28);
+      draw_lock(x + CARD_W / 2, y + 56);
+      text(TEXT_LOCKED, x + CARD_W / 2, y + 112, 22, TONE_MUTED);
+    }
+  }
+}
+
+fn menu_scene() {
+  background();
+  let bob = wave(120, 0) * 6;
+  text(TEXT_TITLE, 400, 104 - bob, 64, TONE_GOLD);
+  text(TEXT_SELECT, 400, 156, 26, TONE_WHITE);
+  let i = 0;
+  while (i < LEVEL_COUNT) {
+    draw_card(i);
+    i = i + 1;
+  }
+  // The cursor glides between cards and breathes.
+  let grow = wave(40, 0) * 4;
+  let x = cursor_x - 7 - grow;
+  let y = cursor_y - 7 - grow;
+  let w = CARD_W + 14 + grow * 2;
+  let h = CARD_H + 14 + grow * 2;
+  quad(x, y, w, 5, 0.95, 0.74, 0.25);
+  quad(x, y + h - 5, w, 5, 0.95, 0.74, 0.25);
+  quad(x, y, 5, h, 0.95, 0.74, 0.25);
+  quad(x + w - 5, y, 5, h, 0.95, 0.74, 0.25);
+  if (menu_t >= 40) {
+    text(TEXT_MENU_HINT, 400, 574, 20, TONE_MUTED);
+  }
+}
+
 // The panel drops in from above and settles at y 200..400 (plus `slide`).
 fn overlay_panel(r, g, b, slide) {
   quad(158, 210 - slide, 500, 200, 0.03, 0.04, 0.08);
@@ -1038,25 +1222,27 @@ fn clear_scene() {
   if (t >= 0) {
     let drop = (1 - ease_back(clamp01(t / CLEAR_PANEL_TICKS))) * 340;
     overlay_panel(0.1, 0.3, 0.2, drop);
+    text(TEXT_CLEARED, 400, 242 - drop, 32, TONE_GOLD);
     let i = 0;
     while (i < 3) {
       let pop = ease_back(clamp01((t - 10 - i * 8) / STAR_POP_TICKS));
       let sx = 300 + i * 100;
       if (i < stars) {
-        diamond(sx, 262, 30 * pop, 0.5, 0.36, 0.1);
-        diamond(sx, 262, 25 * pop, 0.97, 0.78, 0.26);
-        diamond(sx, 262, 12 * pop, 1, 0.94, 0.62);
+        diamond(sx, 288 - drop, 28 * pop, 0.5, 0.36, 0.1);
+        diamond(sx, 288 - drop, 23 * pop, 0.97, 0.78, 0.26);
+        diamond(sx, 288 - drop, 11 * pop, 1, 0.94, 0.62);
       } else {
-        diamond(sx, 262, 24, 0.08, 0.2, 0.15);
+        diamond(sx, 288 - drop, 22, 0.08, 0.2, 0.15);
       }
       i = i + 1;
     }
     sparkles(400, 300, t);
     if (clear_t >= CLEAR_READY) {
       // The "play" triangle breathes once Space will continue.
-      let grow = wave(50, 0) * 6;
-      tri(375, 328 - grow, 375, 372 + grow, 421 + grow, 350, 0.95, 0.74, 0.25);
-      tri(379, 334 - grow, 379, 366 + grow, 413 + grow, 350, 1, 0.9, 0.5);
+      let grow = wave(50, 0) * 4;
+      tri(382, 328 - grow, 382, 362 + grow, 418 + grow, 345, 0.95, 0.74, 0.25);
+      tri(386, 333 - grow, 386, 357 + grow, 410 + grow, 345, 1, 0.9, 0.5);
+      text(TEXT_NEXT, 400, 382, 17, TONE_WHITE);
     }
   }
 }
@@ -1067,12 +1253,18 @@ fn win_scene() {
   diamond(400, 300, 52 + wave(60, 0) * 5, 0.34, 0.84, 0.5);
   diamond(500, 300, 36 + wave(80, 20) * 4, 0.95, 0.74, 0.25);
   diamond(400, 300, 24, 0.8, 1, 0.9);
+  text(TEXT_FINISHED, 400, 244, 34, TONE_GOLD);
+  text(TEXT_BACK, 400, 372, 19, TONE_WHITE);
   sparkles(250, 300, clock % 90);
   sparkles(400, 260, (clock + 30) % 90);
   sparkles(550, 300, (clock + 60) % 90);
 }
 
 fn scene() {
+  if (state == STATE_MENU) {
+    menu_scene();
+    return;
+  }
   background();
   if (state != STATE_WON) {
     board();
@@ -1089,19 +1281,25 @@ fn scene() {
 fn frame() {
   tick_animation();
   if (state == STATE_PLAY) {
-    if (input(INPUT_RESTART) > 0) {
+    if (input(INPUT_MENU) > 0) {
+      enter_menu(current_level);
+    } else if (input(INPUT_RESTART) > 0) {
       load_level(current_level);
     } else {
       update_play();
     }
   } else if (state == STATE_CLEAR) {
-    if (input(INPUT_ACTION_PRESSED) > 0 && clear_t >= CLEAR_READY) {
+    if (input(INPUT_MENU) > 0) {
+      enter_menu(min(current_level + 1, unlocked - 1));
+    } else if (input(INPUT_ACTION_PRESSED) > 0 && clear_t >= CLEAR_READY) {
       advance();
     } else if (input(INPUT_RESTART) > 0) {
       load_level(current_level);
     }
-  } else if (input(INPUT_ACTION_PRESSED) > 0 || input(INPUT_RESTART) > 0) {
-    load_level(0);
+  } else if (state == STATE_MENU) {
+    update_menu();
+  } else if (input(INPUT_ACTION_PRESSED) > 0 || input(INPUT_RESTART) > 0 || input(INPUT_MENU) > 0) {
+    enter_menu(0);
   }
   scene();
 }

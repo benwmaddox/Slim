@@ -7,7 +7,7 @@
  */
 
 const MATH_BUILTINS = ['sin', 'cos', 'atan2', 'pow'];
-const BUILTINS = new Set(['tri', 'sound', 'input', ...MATH_BUILTINS]);
+const BUILTINS = new Set(['tri', 'sound', 'input', 'text', ...MATH_BUILTINS]);
 const SOUND_PACKINGS = new Set(['none', 'numbers', 'bytes']);
 const SOUND_PRESETS = Object.freeze([
   Object.freeze([Object.freeze([0, 7, 0, .14, 1, .85])]),
@@ -223,6 +223,34 @@ function scanJavaScriptImports(source) {
   return { used, modules: used.size ? new Set(['e']) : new Set() };
 }
 
+// Text is drawn on a transparent 2D canvas stacked over the WebGL one. Each
+// string is a <template id="t<N>"> in the page, read once and cached; the
+// overlay is cleared before every simulation tick like the triangle buffer.
+function textHost() {
+  return `
+var o = document.getElementById('o'), q = o.getContext('2d'), C = [], P = ['#fff', '#f4c04a', '#7ee8a2', '#8d9ac0'];
+function fit() {
+  var r = o.getBoundingClientRect(), d = devicePixelRatio || 1;
+  o.width = r.width * d;
+  o.height = r.height * d;
+  q.setTransform(o.width / 800, 0, 0, o.height / 600, 0, 0);
+  q.textAlign = 'center';
+  q.lineJoin = 'round';
+}
+function text(i, x, y, s, k) {
+  var t = C[i] || (C[i] = document.getElementById('t' + i).content.textContent);
+  q.font = 'bold ' + s + 'px system-ui,sans-serif';
+  q.lineWidth = s / 5;
+  q.strokeStyle = '#080a16';
+  q.strokeText(t, x, y);
+  q.fillStyle = P[k | 0] || '#fff';
+  q.fillText(t, x, y);
+  return 0;
+}
+addEventListener('resize', fit);
+fit();`;
+}
+
 function triangleHost() {
   return `
 var v = [], gl, buf;
@@ -392,7 +420,7 @@ c.addEventListener('pointercancel', function (e) {
   ph = 0;
 });`;
   return `
-var held = [0, 0, 0, 0, 0], pressed = 0, restart = 0${pointerState};
+var held = [0, 0, 0, 0, 0], pressed = 0, restart = 0, menu = 0${pointerState};
 ${pointerListeners}
 function key(e, on) {
   var k = e.key.toLowerCase();
@@ -403,6 +431,7 @@ function key(e, on) {
     e.preventDefault();
   }
   if (on && k === 'r' && !e.repeat) restart = 1;
+  if (on && (k === 'escape' || k === 'm') && !e.repeat) menu = 1;
 }
 function input(i) {
   switch (i | 0) {
@@ -414,6 +443,7 @@ function input(i) {
     case 5: return pressed;
 ${pointerInputs}
     case 9: return restart;
+    case 10: return menu;
     default: return 0;
   }
 }
@@ -421,7 +451,7 @@ addEventListener('keydown', function (e) { key(e, 1); });
 addEventListener('keyup', function (e) { key(e, 0); });
 addEventListener('blur', function () {
   held[0] = held[1] = held[2] = held[3] = held[4]${keyboardOnly ? '' : ' = ph'} = 0;
-  pressed = restart = 0;
+  pressed = restart = menu = 0;
 });
 ${pointerEvents}`;
 }
@@ -431,6 +461,7 @@ function makeRuntime({ used, modules, boot, keyboardOnly = false, soundPacking =
   if (used.has('tri')) pieces.push(triangleHost());
   if (used.has('sound')) pieces.push(soundHost(soundPacking));
   if (used.has('input')) pieces.push(inputHost(used.has('sound') ? 'unlock()' : '', keyboardOnly));
+  if (used.has('text')) pieces.push(textHost());
 
   const imports = [];
   for (const module of modules) imports.push(`I[${JSON.stringify(module)}]=E`);
@@ -438,11 +469,12 @@ function makeRuntime({ used, modules, boot, keyboardOnly = false, soundPacking =
   if (used.has('tri')) e.push('tri:tri');
   if (used.has('sound')) e.push('sound:sound');
   if (used.has('input')) e.push('input:input');
+  if (used.has('text')) e.push('text:text');
   for (const name of MATH_BUILTINS) if (used.has(name)) e.push(`${name}:Math.${name}`);
   const setupGpu = used.has('tri') ? 'gpu()' : '';
   const draw = used.has('tri') ? 'draw()' : '';
-  const clear = used.has('tri') ? 'v.length=0;' : '';
-  const inputTick = used.has('input') ? 'pressed=restart=0;' : '';
+  const clear = (used.has('tri') ? 'v.length=0;' : '') + (used.has('text') ? 'q.clearRect(0,0,800,600);' : '');
+  const inputTick = used.has('input') ? 'pressed=restart=menu=0;' : '';
   const audioUnlock = used.has('sound')
     ? keyboardOnly ? 'addEventListener("keydown",unlock)' : 'addEventListener("keydown",unlock);addEventListener("pointerdown",unlock)'
     : '';
@@ -495,12 +527,15 @@ export function makeHtml(wasmBytes, options = {}) {
     ? `var z=atob('${base64(bytes)}'),w=new Uint8Array(z.length),j=0;for(;j<z.length;j++)w[j]=z.charCodeAt(j);WebAssembly.instantiate(w,I).then(function(x){return x.instance.exports})`
     : `fetch(${JSON.stringify(options.wasmUrl).replace(/</g, '\\u003c')}).then(function(r){if(!r.ok)throw Error('WASM '+r.status);return r.arrayBuffer()}).then(function(w){return WebAssembly.instantiate(w,I)}).then(function(x){return x.instance.exports})`;
   const runtime = makeRuntime({ used, modules, boot, keyboardOnly, soundPacking });
-  return page(title, runtime, keyboardOnly, options.footer);
+  return page(title, runtime, keyboardOnly, options.footer, options.texts, used);
 }
 
-function page(title, runtime, keyboardOnly = false, footerText) {
+function page(title, runtime, keyboardOnly = false, footerText, texts = [], used = new Set()) {
+  if (used.has('text') && !texts.length) throw new Error('The game draws text but the page has no texts; add `// text:` lines to the source');
+  const overlay = used.has('text') ? '<canvas id=o width=800 height=600></canvas>' : '';
+  const templates = texts.map((text, index) => `<template id=t${index}>${html(text)}</template>`).join('');
   const footer = footerText ?? (keyboardOnly ? 'Arrows/A-D: move · Space: jump · R: restart' : 'Arrows/WASD · Space · Mouse/Touch · R restarts');
-  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href="data:,"><title>${title}</title><style>html,body{margin:0;width:100%;height:100%;background:#111;color:#fff;font:14px system-ui}main{height:100%;display:grid;place-items:center;align-content:center;gap:4px;text-align:center}canvas{display:block;width:min(100vw,calc((100vh - 24px)*4/3));height:auto;aspect-ratio:4/3;touch-action:none}p{margin:0;opacity:.7}</style><main><canvas width=800 height=600></canvas><p>${html(footer)}</p></main><script>${runtime}</script>`;
+  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href="data:,"><title>${title}</title><style>html,body{margin:0;width:100%;height:100%;background:#111;color:#fff;font:14px system-ui}main{height:100%;display:grid;place-items:center;align-content:center;gap:4px;text-align:center}canvas{display:block;width:min(100vw,calc((100vh - 24px)*4/3));height:auto;aspect-ratio:4/3;touch-action:none;grid-area:1/1}#o{pointer-events:none}p{margin:0;opacity:.7}</style><main><div style=display:grid><canvas width=800 height=600></canvas>${overlay}</div><p>${html(footer)}</p></main>${templates}<script>${runtime}</script>`;
 }
 
 /**
@@ -515,7 +550,7 @@ export function makeJavaScriptHtml(code, options = {}) {
   const title = html(options.title);
   const keyboardOnly = options.keyboardOnly === true;
   const boot = `Promise.resolve((${code})(E))`;
-  return page(title, makeRuntime({ used, modules, boot, keyboardOnly, soundPacking }), keyboardOnly, options.footer);
+  return page(title, makeRuntime({ used, modules, boot, keyboardOnly, soundPacking }), keyboardOnly, options.footer, options.texts, used);
 }
 
 export default makeHtml;

@@ -128,6 +128,11 @@ restarts the level, and Space also continues after a clear. The counter at the
 top left shows moves taken; clearing a level awards one to three stars against a
 reference solution and remembers your best finish for the session. A crate
 pushed into a corner it can never leave throbs red, so a dead end is obvious.
+The game opens on a level-select screen: arrows move a gliding cursor between
+the six cards, Space opens an unlocked level, and Esc or M returns to the menu
+from play. Each card shows the level name, your best stars and best moves, and
+levels unlock in order as you clear them. The names and messages are browser text
+from `// text:` lines (see Browser boundary).
 The source is [examples/boxpush.slim](examples/boxpush.slim); each level is a
 flat 9x8 grid with its ASCII layout kept in comments.
 
@@ -350,11 +355,24 @@ from 220 Hz, gain is 0..1, and zero gain is silent. `input(index)` returns:
 | 6..7 | Pointer x/y in logical coordinates |
 | 8 | Pointer currently held |
 | 9 | R restart pressed |
+| 10 | Esc or M pressed since previous simulation tick |
 
 Sound IDs 0..4 select jump, pickup/stomp, loss, win arpeggio, and level transition.
 The host supplies envelopes and pitch changes, caps simultaneous oscillator
 voices at eight, and disconnects ended nodes. All effects use the same import;
 there are no audio assets to package.
+
+`text(id,x,y,size,tone)` draws a line of browser text centered at (x, y) in the
+same 800x600 space, with `size` in logical pixels and `tone` 0 white, 1 gold,
+2 green, 3 muted. The strings are not in the program: each `// text: ...` line
+of the source becomes `<template id=t0>`, `t1`, ... in the page, and `id` is the
+position in that list. The host reads a template once, caches it, and draws on a
+transparent 2D canvas stacked over the WebGL one. That overlay is sized to the
+displayed canvas times the device pixel ratio, so text stays sharp at any scale,
+and it is cleared before every simulation tick like the triangle buffer. A page
+only gets the overlay and templates when the game calls `text`; a game that calls
+it with no `// text:` lines fails to build. In measurements on Crate Shift the
+whole mechanism costs about 350 zipped bytes, plus roughly 10 per string.
 
 These imports return numbers. The compiler only includes functions/imports
 reachable from the entry points. The host specializes to the imports present in
