@@ -1,4 +1,4 @@
-import {compileDetailed, parseProgram} from "./compiler.mjs";
+import {compileDetailed, parseProgram, INTRINSICS, MATH_IMPORTS} from "./compiler.mjs";
 
 const SVG_METADATA_BUILTIN = "svg_group";
 const SVG_TRI_BUILTIN = "svg_tri";
@@ -234,7 +234,11 @@ function emitJavaScript(program, detailed, precision, svgMetadata) {
             return `e.${SVG_TRI_BUILTIN}(${callSiteId}, ${args})`;
           }
           let call;
-          if (BUILTIN_NAMES.has(node.name)) {
+          if (Object.hasOwn(INTRINSICS, node.name)) {
+            call = `${INTRINSICS[node.name].js}(${args})`;
+          } else if (Object.hasOwn(MATH_IMPORTS, node.name)) {
+            call = `Math.${node.name}(${args})`;
+          } else if (BUILTIN_NAMES.has(node.name)) {
             call = `e.${node.name}(${args})`;
           } else {
             const target = functionNames.get(node.name);

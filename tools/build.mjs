@@ -14,7 +14,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const budget = 13312;
 
 function usage() {
-  console.log('Usage: node tools/build.mjs [source.slim] [--out-dir DIR] [--check] [--compare-f32] [--keyboard-only] [--release] [--search staged|exhaustive] [--pack-triangles NAME] [--sound-packing none|numbers|bytes|auto] [--integer-arrays f32|compact|auto]');
+  console.log('Usage: node tools/build.mjs [source.slim] [--out-dir DIR] [--check] [--compare-f32] [--keyboard-only] [--release] [--search staged|exhaustive] [--pack-triangles NAME] [--sound-packing none|numbers|bytes|auto] [--integer-arrays f32|compact|auto] [--title TEXT] [--footer TEXT]');
 }
 
 const SOUND_PACKING_MODES = ['none', 'numbers', 'bytes'];
@@ -40,6 +40,8 @@ function parseArgs(argv) {
   let search;
   let soundPacking;
   let integerArrayStorage;
+  let title;
+  let footer;
   const packedTriangleArrays = [];
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -100,6 +102,16 @@ function parseArgs(argv) {
       integerArrayStorage = value;
       continue;
     }
+    if (argument === '--title' || argument.startsWith('--title=')) {
+      title = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : argv[++index];
+      if (!title) throw new Error('--title requires text');
+      continue;
+    }
+    if (argument === '--footer' || argument.startsWith('--footer=')) {
+      footer = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : argv[++index];
+      if (!footer) throw new Error('--footer requires text');
+      continue;
+    }
     if (argument === '--out-dir' || argument.startsWith('--out-dir=')) {
       outDir = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : argv[++index];
       if (!outDir) throw new Error('--out-dir requires a directory');
@@ -125,6 +137,22 @@ function parseArgs(argv) {
     soundPacking: soundPacking ?? (release ? 'auto' : 'none'),
     integerArrayStorage: integerArrayStorage ?? (release ? 'auto' : 'f32'),
     packedTriangleArrays: [...new Set(packedTriangleArrays)],
+    title,
+    footer,
+  };
+}
+
+// A game names its own page title and control hint with comment lines such as
+// `// title: Crate Shift` and `// footer: Arrows: move`. The command line
+// options override them, and the host supplies defaults when neither is given.
+function pageText(sourceText, stem, options = {}) {
+  const meta = {};
+  for (const match of sourceText.matchAll(/^[ \t]*\/\/[ \t]*(title|footer):[ \t]*(.*?)[ \t]*\r?$/gm)) {
+    if (match[2] && !(match[1] in meta)) meta[match[1]] = match[2];
+  }
+  return {
+    title: options.title ?? meta.title ?? titleFor(stem),
+    footer: options.footer ?? meta.footer,
   };
 }
 
@@ -289,7 +317,7 @@ function finalArchiveFor(candidate, stem, bestWasm, bestJs, bestF32) {
 
 async function finishBuild({options, sourceText, staging, stem, title, python, zipTool, optimizer, records, skippedCandidates, searchStages}) {
   const select = (items) => items.slice().sort(candidateCompare)[0];
-  const footer = stem === 'critters' ? 'Space: select animal · R: restart' : undefined;
+  const {footer} = pageText(sourceText, stem, options);
   const profiles = [{name: 'js', precision: 'native'}];
   if (options.compareF32) profiles.push({name: 'f32', precision: 'f32'});
   for (const profile of profiles) {
@@ -455,8 +483,7 @@ async function main() {
 
 async function buildInStagingStaged(options, sourceText, staging) {
   const stem = safeStem(options.source);
-  const title = titleFor(stem);
-  const footer = stem === 'critters' ? 'Space: select animal · R: restart' : undefined;
+  const {title, footer} = pageText(sourceText, stem, options);
   const python = process.env.SLIM_PYTHON || 'python';
   const zipTool = resolve(root, 'tools/zip.py');
   const records = [];
@@ -790,8 +817,7 @@ async function buildInStagingStaged(options, sourceText, staging) {
 
 async function buildInStaging(options, sourceText, staging) {
   const stem = safeStem(options.source);
-  const title = titleFor(stem);
-  const footer = stem === 'critters' ? 'Space: select animal · R: restart' : undefined;
+  const {title, footer} = pageText(sourceText, stem, options);
   const python = process.env.SLIM_PYTHON || 'python';
   const zipTool = resolve(root, 'tools/zip.py');
   const records = [];

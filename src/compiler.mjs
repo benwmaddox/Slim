@@ -9,7 +9,16 @@
 
 const SVG_METADATA_BUILTIN = "svg_group";
 const SVG_TRI_BUILTIN = "svg_tri";
-const BUILTIN_ORDER = ["tri", "sound", "input", SVG_METADATA_BUILTIN, SVG_TRI_BUILTIN];
+// Math functions WebAssembly has no instruction for. WASM modules import them
+// from the host (which passes JavaScript's Math function through); the
+// JavaScript backend calls Math directly.
+export const MATH_IMPORTS = Object.freeze({
+  sin: Object.freeze({ params: 1, result: true }),
+  cos: Object.freeze({ params: 1, result: true }),
+  atan2: Object.freeze({ params: 2, result: true }),
+  pow: Object.freeze({ params: 2, result: true }),
+});
+const BUILTIN_ORDER = ["tri", "sound", "input", SVG_METADATA_BUILTIN, SVG_TRI_BUILTIN, ...Object.keys(MATH_IMPORTS)];
 
 const BUILTINS = Object.freeze({
   tri: Object.freeze({ params: 9, result: true }),
@@ -17,7 +26,24 @@ const BUILTINS = Object.freeze({
   input: Object.freeze({ params: 1, result: true }),
   [SVG_METADATA_BUILTIN]: Object.freeze({ params: 1, result: true }),
   [SVG_TRI_BUILTIN]: Object.freeze({ params: 10, result: true }),
+  ...MATH_IMPORTS,
 });
+
+// Pure numeric builtins that compile to a single WebAssembly f32 instruction
+// (and to the matching Math function in JavaScript); they need no host import.
+// `round` is deliberately absent: Math.round rounds halves up while
+// f32.nearest rounds them to even, so the two backends would disagree.
+export const INTRINSICS = Object.freeze({
+  floor: Object.freeze({ params: 1, opcode: 0x8e, js: "Math.floor" }),
+  ceil: Object.freeze({ params: 1, opcode: 0x8d, js: "Math.ceil" }),
+  trunc: Object.freeze({ params: 1, opcode: 0x8f, js: "Math.trunc" }),
+  sqrt: Object.freeze({ params: 1, opcode: 0x91, js: "Math.sqrt" }),
+  abs: Object.freeze({ params: 1, opcode: 0x8b, js: "Math.abs" }),
+  min: Object.freeze({ params: 2, opcode: 0x96, js: "Math.min" }),
+  max: Object.freeze({ params: 2, opcode: 0x97, js: "Math.max" }),
+});
+
+const isReservedName = (name) => Object.hasOwn(BUILTINS, name) || Object.hasOwn(INTRINSICS, name);
 
 const F32 = 0x7d;
 const TRIANGLE_PACK_ENCODING = "triangles-i8-palette-f32";
@@ -271,7 +297,7 @@ class Parser {
         if (functions.has(fn.name)) {
           compileError(`duplicate function ${JSON.stringify(fn.name)}`, fn.token);
         }
-        if (Object.hasOwn(BUILTINS, fn.name)) {
+        if (isReservedName(fn.name)) {
           compileError(`function name ${JSON.stringify(fn.name)} is reserved for a builtin`, fn.token);
         }
         functions.set(fn.name, fn);
@@ -281,6 +307,8 @@ class Parser {
     }
 
     const program = {globals, arrays, functions};
+    const outerNames = new Set([...globalNames, ...constants.map((constant) => constant.name)]);
+    for (const fn of functions.values()) scopeLocals(fn, outerNames);
     const lowered = constants.length === 0 ? program : lowerConstants(program, constants);
     return resolveArrays(lowered);
   }
@@ -577,6 +605,108 @@ function collectFunctionLocalNames(fn) {
   return names;
 }
 
+// Locals are block scoped: a name may be declared again in a sibling block, and
+// a use before its declaration refers to the outer name (a global or constant).
+// Redeclaring a name that is already visible (a parameter or an enclosing local)
+// is still an error.  This pass gives every declaration a unique function-wide
+// name (`name`, then `name$1`, ...) and rewrites its uses, so the layout and
+// code generation of both backends keep treating locals as one flat set.
+// `$` cannot appear in source identifiers, so generated names never collide.
+function scopeLocals(fn, outerNames) {
+  const used = new Set();
+  const scopes = [new Map()];
+  const lookup = (name) => {
+    for (let index = scopes.length - 1; index >= 0; index -= 1) {
+      if (scopes[index].has(name)) return scopes[index].get(name);
+    }
+    return undefined;
+  };
+  const declare = (node) => {
+    if (lookup(node.name) !== undefined) {
+      compileError(`duplicate local ${JSON.stringify(node.name)}`, node.token);
+    }
+    let unique = node.name;
+    // Locals named like a global or constant always get a fresh name, so that
+    // name stays visible outside the block (or before the let) that shadows it.
+    for (let count = 1; used.has(unique) || (unique === node.name && outerNames.has(unique)); count += 1) {
+      unique = `${node.name}$${count}`;
+    }
+    used.add(unique);
+    scopes[scopes.length - 1].set(node.name, unique);
+    node.name = unique;
+  };
+  for (const parameter of fn.params) declare(parameter);
+
+  const rewriteExpression = (expression) => {
+    switch (expression.kind) {
+      case "name": {
+        const unique = lookup(expression.name);
+        if (unique !== undefined) expression.name = unique;
+        break;
+      }
+      case "unary":
+        rewriteExpression(expression.expression);
+        break;
+      case "binary":
+        rewriteExpression(expression.left);
+        rewriteExpression(expression.right);
+        break;
+      case "call":
+        expression.args.forEach(rewriteExpression);
+        break;
+      case "index":
+        rewriteExpression(expression.index);
+        break;
+      default:
+        break;
+    }
+  };
+  const rewriteBlock = (statements) => {
+    scopes.push(new Map());
+    statements.forEach(rewriteStatement);
+    scopes.pop();
+  };
+  function rewriteStatement(statement) {
+    switch (statement.kind) {
+      case "let":
+        rewriteExpression(statement.expression);
+        declare(statement);
+        break;
+      case "assign": {
+        rewriteExpression(statement.expression);
+        const unique = lookup(statement.name);
+        if (unique !== undefined) statement.name = unique;
+        break;
+      }
+      case "arrayAssign":
+        rewriteExpression(statement.index);
+        rewriteExpression(statement.expression);
+        break;
+      case "expr":
+        rewriteExpression(statement.expression);
+        break;
+      case "return":
+        if (statement.expression) rewriteExpression(statement.expression);
+        break;
+      case "if":
+        rewriteExpression(statement.condition);
+        rewriteBlock(statement.thenBlock.body);
+        if (statement.elseBlock) rewriteBlock(statement.elseBlock.body);
+        break;
+      case "while":
+        rewriteExpression(statement.condition);
+        rewriteBlock(statement.body.body);
+        break;
+      case "block":
+        rewriteBlock(statement.body);
+        break;
+      default:
+        break;
+    }
+  }
+  fn.body.forEach(rewriteStatement);
+}
+
 function lowerConstants(program, declarations) {
   const constants = new Map(declarations.map((constant) => [constant.name, constant]));
   const globalNames = new Set(program.globals.map((global) => global.name));
@@ -593,7 +723,7 @@ function lowerConstants(program, declarations) {
     if (functionNames.has(constant.name)) {
       compileError(`constant name ${JSON.stringify(constant.name)} collides with a function`, constant.token);
     }
-    if (Object.hasOwn(BUILTINS, constant.name)) {
+    if (isReservedName(constant.name)) {
       compileError(`constant name ${JSON.stringify(constant.name)} is reserved for a builtin`, constant.token);
     }
   }
@@ -760,7 +890,7 @@ function resolveArrays(program) {
     if (functionNames.has(array.name)) {
       compileError(`array name ${JSON.stringify(array.name)} collides with a function`, array.token);
     }
-    if (Object.hasOwn(BUILTINS, array.name)) {
+    if (isReservedName(array.name)) {
       compileError(`array name ${JSON.stringify(array.name)} is reserved for a builtin`, array.token);
     }
 
@@ -1017,6 +1147,13 @@ function prepareReachability(program, options = {}) {
     for (const statement of fn.body) {
       walkStatement(statement, (node) => {
         if (node.kind !== "call") return;
+        if (Object.hasOwn(INTRINSICS, node.name)) {
+          const intrinsic = INTRINSICS[node.name];
+          if (node.args.length !== intrinsic.params) {
+            compileError(`builtin ${JSON.stringify(node.name)} expects ${intrinsic.params} arguments, got ${node.args.length}`, node.token);
+          }
+          return;
+        }
         const builtin = Object.hasOwn(BUILTINS, node.name) ? BUILTINS[node.name] : undefined;
         if (builtin) {
           if (node.args.length !== builtin.params) {
@@ -1523,6 +1660,11 @@ function emitModule(program, options = {}) {
               compileError("internal error: missing SVG triangle metadata import", node.token);
             }
             append(0x10, ...u32(svgTriIndex));
+            return;
+          }
+          if (Object.hasOwn(INTRINSICS, node.name)) {
+            for (const argument of node.args) emit(argument);
+            append(INTRINSICS[node.name].opcode);
             return;
           }
           const functionIndex = context.functionIndices.get(node.name);

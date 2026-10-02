@@ -49,6 +49,10 @@ to f32. JS/HTML minification runs on every build.
 `rainbow.js.html` / `rainbow.js.zip` contain the native JavaScript version;
 `rainbow.js` is its readable generated factory.
 `rainbow.size.json` records every candidate against the 13,312-byte target.
+A game sets its page title and control hint with comment lines in its source,
+`// title: Crate Shift` and `// footer: Arrows: move`; `--title TEXT` and
+`--footer TEXT` override them. Without either, the title comes from the file
+name and the host's default hint is used.
 Only these eight final files are retained. Optimizer intermediates and packaging
 candidates are measured in a temporary directory and discarded. Successful builds
 also remove obsolete candidate files for the current source basename.
@@ -110,6 +114,31 @@ geometry. Directly invoke `tools/build.mjs` without `--release` or
 the `shardbound` basename.
 Serve
 `dist/shardbound.html` or open `dist/shardbound.js.html` for the native JS version.
+
+## Puzzle example: Crate Shift
+
+```sh
+npm run build:boxpush
+```
+
+Crate Shift is a six-level push-only puzzle. Move with the arrows or WASD and
+push crates onto the gold diamonds; crates can only be pushed, never pulled, and
+only one at a time. R restarts the level and Space continues after a clear.
+The source is [examples/boxpush.slim](examples/boxpush.slim); each level is a
+flat 9x8 grid with its ASCII layout kept in comments.
+
+Everything that moves is animated without changing game logic: levels drop in as
+a diagonal wave, the porter glides and hops between cells (crates slide with
+them), a blocked move shakes, a crate landing on a target sends out a ring, and a
+cleared level drops in a panel and throws confetti. Game state changes instantly;
+the animation timers only decide how far drawing lags behind, so input is never
+delayed.
+
+`tools/boxpush-solver.mjs` is an independent breadth-first solver (fewest
+pushes). `tests/boxpush.test.mjs` decodes the levels straight out of the Slim
+source, proves each is solvable, and replays every solution through real input
+in WASM, native JS, and f32 JS until the win screen. Solutions are 3, 8, 12, 16,
+16, and 18 pushes. The same tests check the animation timing.
 
 ## Procedural animals example
 
@@ -204,15 +233,61 @@ Numbers, parameters, globals, locals, and function results are f32 in WASM and
 exact-f32 JS. The native JS comparison uses JavaScript number semantics. Functions
 without a return produce zero. Both `init` and `frame` must be declared and take
 zero arguments. Globals are mutable persistent game state, with constant numeric
-initializers. Locals are function-scoped in v0 and start at zero on each call.
-There are local `let` declarations, assignments, `if/else`, `while`, `return`,
-function calls, arithmetic, comparisons, and short-circuit logical expressions.
+initializers. Locals are block scoped and start at zero on each call; see
+[Locals and scope](#locals-and-scope).
+There are local `let` declarations, assignments, `if/else`, `while`, `return`
+(or a bare `return;`, which yields 0), function calls, arithmetic, comparisons,
+and short-circuit logical expressions.
 Comparisons and logical expressions produce numeric 0 or 1. Arithmetic and
 constant initializers round at each f32 operation. `%` is implemented as
 `x - trunc(x / y) * y`, with f32 rounding; it is intended for small game values
 and can lose precision for large quotients. Fixed numeric arrays are described
 below. There are no strings, allocation, classes, or modules. WASM is emitted directly; no C,
 Rust, LLVM, or language runtime is required to build a game.
+
+## Locals and scope
+
+A `let` is visible from its declaration to the end of the block it is in. Sibling
+blocks (the bodies of two loops, or the two arms of an `if`) can each declare a
+local with the same name. Redeclaring a name that is already visible, whether a
+parameter or a local from an enclosing block, is an error. A local named like a
+global, array, or constant shadows it only inside its block, and a use before the
+`let` still refers to the global. The frontend gives each declaration a unique
+internal name, so both backends keep a flat local layout and generated code does
+not change.
+
+```text
+fn frame() {
+  let i = 0;
+  while (i < 3) {
+    let x = i * 10;   // this x ...
+    i = i + 1;
+  }
+  if (i == 3) {
+    let x = 7;        // ... and this x do not conflict
+  }
+}
+```
+
+## Math builtins
+
+These are available without declaring them, and their names are reserved.
+
+| Builtin | Meaning | WASM |
+| --- | --- | --- |
+| `floor(x)`, `ceil(x)`, `trunc(x)` | round down, up, or toward zero | one f32 instruction |
+| `abs(x)`, `sqrt(x)` | absolute value, square root | one f32 instruction |
+| `min(a, b)`, `max(a, b)` | smaller or larger | one f32 instruction |
+| `sin(x)`, `cos(x)`, `atan2(y, x)`, `pow(x, y)` | JavaScript `Math` functions | imported from the host |
+
+JavaScript output calls `Math.floor`, `Math.sin`, and so on directly. In WASM the
+first group needs no import; the second group adds an import only when the game
+uses it, and the browser host forwards it to `Math`. Integer division is
+`floor(a / b)` and a cell's row in a flat grid is `floor(index / width)`.
+`round` is left out on purpose: `Math.round` rounds halves up while `f32.nearest`
+rounds them to even, so the backends would disagree. Native JS keeps `Math`'s
+double result for `sin` and friends while WASM stores f32, like the rest of the
+native-versus-f32 differences described under Limits.
 
 ## Compile-time constants
 
@@ -228,7 +303,7 @@ global state = STATE_PLAYING;
 Constants may reference other constants, including later declarations. Their
 numeric expressions use Slim's f32 arithmetic at compile time. Constants cannot
 depend on mutable globals or calls, and cannot be assigned to. Function parameters
-and locals may shadow a constant, following the existing function scope rules.
+and locals may shadow a constant inside their scope.
 The compiler replaces constant references with numeric literals before either
 backend runs. No constant declarations, names, globals, or lookup code ship in
 the game. Both examples use constants for game states, input indices, and sound

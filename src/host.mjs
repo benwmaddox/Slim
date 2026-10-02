@@ -6,7 +6,8 @@
  * default, with an external URL available when that makes the ZIP smaller.
  */
 
-const BUILTINS = new Set(['tri', 'sound', 'input']);
+const MATH_BUILTINS = ['sin', 'cos', 'atan2', 'pow'];
+const BUILTINS = new Set(['tri', 'sound', 'input', ...MATH_BUILTINS]);
 const SOUND_PACKINGS = new Set(['none', 'numbers', 'bytes']);
 const SOUND_PRESETS = Object.freeze([
   Object.freeze([Object.freeze([0, 7, 0, .14, 1, .85])]),
@@ -437,6 +438,7 @@ function makeRuntime({ used, modules, boot, keyboardOnly = false, soundPacking =
   if (used.has('tri')) e.push('tri:tri');
   if (used.has('sound')) e.push('sound:sound');
   if (used.has('input')) e.push('input:input');
+  for (const name of MATH_BUILTINS) if (used.has(name)) e.push(`${name}:Math.${name}`);
   const setupGpu = used.has('tri') ? 'gpu()' : '';
   const draw = used.has('tri') ? 'draw()' : '';
   const clear = used.has('tri') ? 'v.length=0;' : '';

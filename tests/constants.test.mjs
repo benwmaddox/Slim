@@ -94,7 +94,7 @@ test('evaluates constant expressions with f32 rounding and preserves special val
   }
 });
 
-test('function locals and parameters shadow constants across the precollected scope', () => {
+test('function locals and parameters shadow constants from their declaration onward', () => {
   const source = `
     const VALUE = 9;
     fn identity(VALUE) { return VALUE; }
@@ -106,9 +106,11 @@ test('function locals and parameters shadow constants across the precollected sc
       return before + identity(VALUE) + assignShadow();
     }
   `;
-  assert.equal(wasmRuntime(source).instance.exports.frame(), 5);
-  assert.equal(javascriptRuntime(source, 'native').runtime.frame(), 5);
-  assert.equal(javascriptRuntime(source, 'f32').runtime.frame(), 5);
+  // Locals are block scoped: `before` still sees the constant (9) because the
+  // `let VALUE` comes after it.
+  assert.equal(wasmRuntime(source).instance.exports.frame(), 14);
+  assert.equal(javascriptRuntime(source, 'native').runtime.frame(), 14);
+  assert.equal(javascriptRuntime(source, 'f32').runtime.frame(), 14);
 });
 
 test('rejects invalid constant declarations and immutable assignments deterministically', () => {
