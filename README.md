@@ -5,7 +5,7 @@ a triangle-only WebGL host, procedural JavaScript sound, and keyboard/pointer
 input. Independent of Stasis. See [PLAN.md](PLAN.md) for scope and milestones.
 
 The same source builds to WASM or JavaScript. See [PROGRESS.md](PROGRESS.md)
-for complete ZIP comparisons, validation, and current limits.
+for ZIP comparisons, validation, and current limits.
 
 ## Build
 
@@ -19,10 +19,12 @@ npm run build
 ```
 
 Outputs follow the source basename: `rainbow.wasm`, `rainbow.wat`,
-`rainbow.html`, and `rainbow.zip`. The build compares embedded and separate WASM,
-plain and optional Binaryen `-Oz`, `-Os`, `-O4`, and `-Oz --converge`, and original versus
-Terser-minified scripts.
-It selects by complete ZIP size, including archive overhead.
+`rainbow.html`, and `rainbow.zip`. The build compares external WASM and external
+minified JavaScript pages using complete ZIP sizes, including archive overhead.
+The ZIP contains `index.html` plus the winning `.wasm` or `.js` payload; both
+standalone HTML pages and the full minified script remain available to inspect.
+The JavaScript page points to `rainbow.min.js`; `rainbow.js` remains the readable
+generated game factory.
 
 For a release build, add `--release` or run `npm run build:release`. This also
 compares f32 and compact integer-array storage, plus plain, compact numeric,
@@ -33,8 +35,9 @@ array names to compare their packed and unpacked WASM forms:
 node tools/build.mjs examples/shardbound.slim --release --keyboard-only --pack-triangles ATLAS
 ```
 
-Each backend keeps its smallest measured complete ZIP. Equal sizes favor simpler
-encodings. Release builds default to staged search: change one setting at a time
+Each backend keeps its smallest measured complete ZIP, then the smaller backend's
+ZIP becomes `rainbow.zip`. Equal sizes favor simpler encodings. Release builds
+default to staged search: change one setting at a time
 and recheck for interactions in a second pass. Cached trials avoid repeated work.
 Use `--search exhaustive` for a complete audit, or `--search staged` to use the
 same approach in an ordinary build. The size report records phase savings,
@@ -46,35 +49,35 @@ with `none`, `numbers`, or `bytes` to force a sound format;
 `auto` controls the exact integer-storage experiment; ordinary builds default
 to f32. JS/HTML minification runs on every build.
 
-`rainbow.js.html` / `rainbow.js.zip` contain the native JavaScript version;
-`rainbow.js` is its readable generated factory.
+`rainbow.js.html` loads the external, compressed and mangled browser script
+`rainbow.min.js`. `rainbow.js` is its readable generated factory. The winning
+ZIP uses `index.html` and `rainbow.js` when the JavaScript backend is smaller.
+`--compare-f32` also emits `rainbow.f32.min.js` alongside the readable f32 factory.
 `rainbow.size.json` records every candidate against the 13,312-byte target.
 A game sets its page title and control hint with comment lines in its source,
 `// title: Crate Shift` and `// footer: Arrows: move`; `--title TEXT` and
 `--footer TEXT` override them. Without either, the title comes from the file
 name and the host's default hint is used.
-Only these eight final files are retained. Optimizer intermediates and packaging
+Only these eight final files are retained, plus three optional f32 inspection files.
+Optimizer intermediates and packaging
 candidates are measured in a temporary directory and discarded. Successful builds
 also remove obsolete candidate files for the current source basename.
 
 For numeric comparisons, `npm run build -- --compare-f32` additionally emits
-`rainbow.f32.js`, `rainbow.f32.html`, and `rainbow.f32.zip`. Normal builds remove
-these optional outputs. To browser-check that comparison, pass
+`rainbow.f32.js`, `rainbow.f32.min.js`, and `rainbow.f32.html`. Normal builds
+remove these optional outputs. To browser-check that comparison, pass
 `--profiles=wasm,js-native,js-f32` to `tools/browser-check.mjs`.
-Archives use top-level `index.html`, as required by the supplied rules; an
-external WASM layout also contains `rainbow.wasm`. Inspection artifacts and
-development dependencies are excluded.
+Archives use top-level `index.html` and only the selected backend's payload.
+Inspection artifacts and development dependencies are excluded.
 
 Serve the selected output with `python -m http.server 8000 --directory dist`,
-then open `http://localhost:8000/rainbow.html` or `rainbow.js.html`.
-Separate WASM needs HTTP because browsers
-restrict file URL fetching. The JavaScript versions are self-contained and can
-be opened directly after extraction.
+then open `http://localhost:8000/rainbow.html` or `rainbow.js.html`. Both
+standalone pages load their external payload beside them.
 
 Optional: put Binaryen's `wasm-opt` on PATH, or set `SLIM_WASM_OPT` to its
 executable. Set `SLIM_WASM_DIS` if the disassembler is not on PATH. The build
-compares plain, `-Oz`, `-Os`, `-O4`, and `-Oz --converge` output across both packaging
-layouts and selects the smallest complete ZIP. Set `SLIM_PYTHON` if Python uses
+compares plain, `-Oz`, `-Os`, `-O4`, and `-Oz --converge` output for external WASM
+packages. Set `SLIM_PYTHON` if Python uses
 a different command name. An explicitly configured optimizer failure aborts
 the build.
 
@@ -142,7 +145,17 @@ parabolic hop (crates slide with them, undo slides them back), dust puffs kick u
 at each step, a blocked move shakes, a crate landing on a target sends out a
 ring, and a cleared level jolts the view, drops in a bouncing panel, pops the
 stars, and throws confetti. The backdrop has twinkling stars, banded sky and
-vignette, and every tile casts a shadow. Game state changes instantly; the
+vignette, and every tile casts a shadow.
+
+The look deliberately mixes shapes. Rectangles (two triangles each) form the base
+of the board, diamonds mark targets and pips, and true triangles carry the rest:
+mitred bevels and diagonal facets on floors and walls, the porter's
+pointed cap, chamfered menu cards with triangular cursor brackets, five-pointed
+stars made of ten triangles, large slow shards drifting behind the board, and a
+pool of 56 spinning shards thrown out when a crate is pushed, lands on a target,
+or a level is cleared. In the test measurements a playing frame is roughly 59%
+rectangles, 9% diamonds and 31% lone triangles, and a cleared level about 40%
+triangles. Game state changes instantly; the
 animation timers only decide how far drawing lags behind, so input is never
 delayed.
 

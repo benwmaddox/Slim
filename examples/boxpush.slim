@@ -69,6 +69,18 @@ const CLEAR_PANEL_DELAY = 20;
 const CLEAR_READY = 44;
 const STAR_POP_TICKS = 16;
 const PUFF_COUNT = 8;
+const PART_COUNT = 56;
+const PART_TICKS = 34;
+
+const PART_GOLD = 0;
+const PART_GREEN = 1;
+const PART_MIXED = 2;
+const PART_WOOD = 3;
+
+const STAR_TIP = -1.5708;
+const STAR_STEP = 1.25664;
+const STAR_HALF = 0.62832;
+const THIRD = 2.0944;
 
 // <template> ids for the text() builtin; see the `// text:` lines above.
 const TEXT_TITLE = 0;
@@ -101,6 +113,13 @@ const TWO_STAR_FACTOR = 2.5;
 const SPARK_COUNT = 14;
 const SPARK_VX = [-4.2, -3.4, -2.6, -1.9, -1.2, -0.6, -0.2, 0.2, 0.6, 1.2, 1.9, 2.6, 3.4, 4.2];
 const SPARK_VY = [-6.5, -8.5, -5.5, -9.5, -7, -10, -6, -6.5, -10, -7.5, -9.5, -5.5, -8, -6];
+
+// Big, slow shards drifting behind the board.
+const SHARD_COUNT = 9;
+const SHARD_X = [40, 190, 330, 470, 610, 750, 120, 400, 690];
+const SHARD_Y = [90, 300, 120, 450, 80, 330, 520, 40, 540];
+const SHARD_SIZE = [70, 46, 88, 58, 74, 52, 64, 40, 80];
+const SHARD_SPEED = [0.05, 0.08, 0.04, 0.07, 0.05, 0.09, 0.06, 0.1, 0.04];
 
 const STAR_COUNT = 26;
 const STAR_X = [34, 96, 150, 212, 268, 330, 392, 455, 512, 570, 636, 700, 764, 60, 180, 300, 420, 540, 660, 740, 120, 240, 480, 600, 20, 780];
@@ -308,6 +327,16 @@ global puff_next = 0;
 global puff_x = [0; PUFF_COUNT];
 global puff_y = [0; PUFF_COUNT];
 global puff_life = [0; PUFF_COUNT];
+global part_next = 0;
+global part_x = [0; PART_COUNT];
+global part_y = [0; PART_COUNT];
+global part_vx = [0; PART_COUNT];
+global part_vy = [0; PART_COUNT];
+global part_a = [0; PART_COUNT];
+global part_va = [0; PART_COUNT];
+global part_life = [0; PART_COUNT];
+global part_max = [1; PART_COUNT];
+global part_kind = [0; PART_COUNT];
 
 fn tile_at(index) {
   return LEVEL_MAP[current_level * CELLS + index];
@@ -435,6 +464,11 @@ fn load_level(level) {
     puff_life[i] = 0;
     i = i + 1;
   }
+  i = 0;
+  while (i < PART_COUNT) {
+    part_life[i] = 0;
+    i = i + 1;
+  }
   covered = count_covered();
 }
 
@@ -484,6 +518,34 @@ fn spawn_puffs(cell) {
   puff_next = (puff_next + 1) % PUFF_COUNT;
 }
 
+// A ring of spinning triangular shards thrown out from (cx, cy).
+fn spawn_burst(cx, cy, count, kind) {
+  let k = 0;
+  while (k < count) {
+    let angle = k * 6.2832 / count + k % 3 * 0.3;
+    let speed = 1.8 + k % 4 * 0.9;
+    part_x[part_next] = cx;
+    part_y[part_next] = cy;
+    part_vx[part_next] = cos(angle) * speed;
+    part_vy[part_next] = sin(angle) * speed - 1.6;
+    part_a[part_next] = angle;
+    part_va[part_next] = (k % 2 * 2 - 1) * (0.1 + k % 3 * 0.05);
+    part_life[part_next] = PART_TICKS + k % 5 * 4;
+    part_max[part_next] = PART_TICKS + k % 5 * 4;
+    part_kind[part_next] = kind;
+    part_next = (part_next + 1) % PART_COUNT;
+    k = k + 1;
+  }
+}
+
+fn cell_center_x(cell) {
+  return origin_x + cell_col(cell) * TILE + 32;
+}
+
+fn cell_center_y(cell) {
+  return origin_y + cell_row(cell) * TILE + 32;
+}
+
 fn finish_level() {
   state = STATE_CLEAR;
   clear_t = 0;
@@ -508,6 +570,7 @@ fn push_crate(to, beyond) {
   crate[to] = 0;
   crate[beyond] = 1;
   spawn_puffs(player);
+  spawn_burst(cell_center_x(to), cell_center_y(to) + 14, 4, PART_WOOD);
   player = to;
   move_t = MOVE_TICKS;
   push_cell = beyond;
@@ -516,6 +579,7 @@ fn push_crate(to, beyond) {
   if (tile_at(beyond) == TILE_TARGET) {
     pulse_t = PULSE_TICKS;
     pulse_cell = beyond;
+    spawn_burst(cell_center_x(beyond), cell_center_y(beyond), 14, PART_GOLD);
   }
   if (covered == LEVEL_BOXES[current_level]) {
     finish_level();
@@ -711,6 +775,25 @@ fn tick_animation() {
     puff_life[i] = max(puff_life[i] - 1, 0);
     i = i + 1;
   }
+  i = 0;
+  while (i < PART_COUNT) {
+    if (part_life[i] > 0) {
+      part_life[i] = part_life[i] - 1;
+      part_x[i] = part_x[i] + part_vx[i];
+      part_y[i] = part_y[i] + part_vy[i];
+      part_vx[i] = part_vx[i] * 0.985;
+      part_vy[i] = part_vy[i] + 0.14;
+      part_a[i] = part_a[i] + part_va[i];
+    }
+    i = i + 1;
+  }
+  if (state == STATE_CLEAR && clear_t == CLEAR_PANEL_DELAY) {
+    spawn_burst(400, 300, 20, PART_GREEN);
+    spawn_burst(400, 300, 20, PART_MIXED);
+  }
+  if (state == STATE_WON && clock % 45 == 0) {
+    spawn_burst(250 + clock / 45 % 3 * 150, 290, 16, PART_MIXED);
+  }
   // The whole view jolts briefly when a level is cleared.
   let jolt = shake_t * 0.5;
   if (shake_t % 2 == 1) {
@@ -742,6 +825,49 @@ fn diamond_ring(cx, cy, size, w, r, g, b) {
   tri(cx - size, cy, cx, cy - size + w, cx - size + w, cy, r, g, b);
 }
 
+// A triangle spun by `angle` around its centre: the basic shard.
+fn rtri(cx, cy, size, angle, r, g, b) {
+  tri(cx + cos(angle) * size, cy + sin(angle) * size,
+    cx + cos(angle + THIRD) * size, cy + sin(angle + THIRD) * size,
+    cx + cos(angle + THIRD * 2) * size, cy + sin(angle + THIRD * 2) * size, r, g, b);
+}
+
+// A five-pointed star as ten triangles around its centre.
+fn star(cx, cy, outer, inner, spin, r, g, b) {
+  let k = 0;
+  while (k < 5) {
+    let tip = STAR_TIP + spin + k * STAR_STEP;
+    let valley = tip + STAR_HALF;
+    let next = tip + STAR_STEP;
+    tri(cx, cy, cx + cos(tip) * outer, cy + sin(tip) * outer, cx + cos(valley) * inner, cy + sin(valley) * inner, r, g, b);
+    tri(cx, cy, cx + cos(valley) * inner, cy + sin(valley) * inner, cx + cos(next) * outer, cy + sin(next) * outer, r, g, b);
+    k = k + 1;
+  }
+}
+
+// A rectangle with its four corners cut off by triangles.
+fn chamfer(x, y, w, h, cut, r, g, b) {
+  quad(x + cut, y, w - cut * 2, h, r, g, b);
+  quad(x, y + cut, w, h - cut * 2, r, g, b);
+  tri(x, y + cut, x + cut, y, x + cut, y + cut, r, g, b);
+  tri(x + w - cut, y, x + w, y + cut, x + w - cut, y + cut, r, g, b);
+  tri(x, y + h - cut, x + cut, y + h - cut, x + cut, y + h, r, g, b);
+  tri(x + w - cut, y + h - cut, x + w, y + h - cut, x + w - cut, y + h, r, g, b);
+}
+
+// A square frame of four mitred strips, each lit differently (top, left,
+// bottom, right), so a tile reads as a raised slab.
+fn bevel(x, y, size, w, tr, tg, tb, lr, lg, lb, br, bg, bb, rr, rg, rb) {
+  tri(x, y, x + size, y, x + size - w, y + w, tr, tg, tb);
+  tri(x, y, x + size - w, y + w, x + w, y + w, tr, tg, tb);
+  tri(x, y, x + w, y + w, x + w, y + size - w, lr, lg, lb);
+  tri(x, y, x + w, y + size - w, x, y + size, lr, lg, lb);
+  tri(x, y + size, x + size, y + size, x + size - w, y + size - w, br, bg, bb);
+  tri(x, y + size, x + size - w, y + size - w, x + w, y + size - w, br, bg, bb);
+  tri(x + size, y, x + size, y + size, x + size - w, y + size - w, rr, rg, rb);
+  tri(x + size, y, x + size - w, y + size - w, x + size - w, y + w, rr, rg, rb);
+}
+
 // A flat ellipse made of one fan of triangles, used for soft contact shadows.
 fn blob(cx, cy, rx, ry, r, g, b) {
   tri(cx - rx, cy, cx, cy - ry, cx + rx, cy, r, g, b);
@@ -765,6 +891,14 @@ fn background() {
   tri(380, 600, 640, 270, 800, 600, 0.11, 0.12, 0.22);
   tri(-80, 600, 120, 420, 320, 600, 0.12, 0.13, 0.23);
   let i = 0;
+  while (i < SHARD_COUNT) {
+    let drift = (SHARD_X[i] + clock * SHARD_SPEED[i]) % 960 - 80;
+    let bob = wave(400, i * 53) * 24;
+    let tone = 0.015 * (i % 3);
+    rtri(drift, SHARD_Y[i] + bob, SHARD_SIZE[i], clock * 0.003 * (1 + i % 3) + i, 0.085 + tone, 0.1 + tone, 0.2 + tone);
+    i = i + 1;
+  }
+  i = 0;
   while (i < STAR_COUNT) {
     let size = 0.8 + wave(110, i * 17) * 2.2;
     diamond(STAR_X[i], STAR_Y[i], size, 0.55, 0.62, 0.85);
@@ -795,15 +929,14 @@ fn draw_floor(x, y, cx, cy) {
   let shade = jitter(cx, cy) * 0.025;
   if ((cx + cy) % 2 == 0) {
     quad(x, y, TILE, TILE, 0.17 + shade, 0.23 + shade, 0.3 + shade);
+    tri(x, y, x + TILE, y, x, y + TILE, 0.19 + shade, 0.25 + shade, 0.32 + shade);
   } else {
     quad(x, y, TILE, TILE, 0.15 + shade, 0.2 + shade, 0.27 + shade);
+    tri(x + TILE, y, x + TILE, y + TILE, x, y + TILE, 0.13 + shade, 0.18 + shade, 0.25 + shade);
   }
-  quad(x, y, TILE, 2, 0.26, 0.33, 0.41);
-  quad(x, y, 2, TILE, 0.22, 0.29, 0.37);
-  quad(x, y + TILE - 2, TILE, 2, 0.1, 0.14, 0.2);
-  quad(x + TILE - 2, y, 2, TILE, 0.1, 0.14, 0.2);
+  bevel(x, y, TILE, 3, 0.27, 0.34, 0.42, 0.22, 0.29, 0.37, 0.1, 0.14, 0.2, 0.09, 0.13, 0.19);
   if (jitter(cx, cy) > 0.6) {
-    quad(x + 12 + jitter(cy, cx) * 30, y + 14 + jitter(cx, cx) * 30, 4, 3, 0.12, 0.17, 0.23);
+    rtri(x + 14 + jitter(cy, cx) * 34, y + 16 + jitter(cx, cx) * 32, 4, jitter(cx, cy) * 6, 0.12, 0.17, 0.23);
   }
 }
 
@@ -811,12 +944,15 @@ fn draw_wall(x, y, cx, cy) {
   let shade = jitter(cx, cy) * 0.04;
   quad(x, y, TILE, TILE, 0.18, 0.2, 0.31);
   quad(x + 3, y + 3, TILE - 6, TILE - 12, 0.34 + shade, 0.38 + shade, 0.54 + shade);
-  quad(x + 3, y + 3, TILE - 6, 7, 0.52, 0.58, 0.76);
+  tri(x + 3, y + 3, x + TILE - 3, y + 3, x + TILE - 10, y + 10, 0.52, 0.58, 0.76);
+  tri(x + 3, y + 3, x + TILE - 10, y + 10, x + 10, y + 10, 0.52, 0.58, 0.76);
   quad(x + 3, y + 10, 3, TILE - 22, 0.42, 0.47, 0.63);
   quad(x + TILE - 6, y + 10, 3, TILE - 22, 0.27, 0.3, 0.44);
   quad(x + 3, y + 30, TILE - 6, 3, 0.25, 0.28, 0.42);
   quad(x + 20 + (cy % 2) * 24, y + 10, 3, 20, 0.25, 0.28, 0.42);
   quad(x + 14 + ((cy + 1) % 2) * 24, y + 33, 3, 18, 0.25, 0.28, 0.42);
+  tri(x + 3, y + 10, x + 20, y + 10, x + 3, y + 28, 0.46 + shade, 0.51 + shade, 0.68 + shade);
+  tri(x + TILE - 3, y + 52, x + TILE - 22, y + 52, x + TILE - 3, y + 34, 0.22, 0.25, 0.38);
 }
 
 fn draw_target(x, y) {
@@ -886,8 +1022,10 @@ fn draw_player(x, y, dir) {
   quad(x + 28, y + 36, 8, 8, 0.95, 0.8, 0.3);
   quad(x + 18, y + 8, 28, 26, 0.07, 0.1, 0.18);
   quad(x + 20, y + 10, 24, 22, 0.99, 0.82, 0.62);
-  quad(x + 18, y + 7, 28, 8, 0.92, 0.3, 0.26);
-  quad(x + 18, y + 13, 28, 2, 0.7, 0.2, 0.2);
+  tri(x + 18, y + 12, x + 46, y + 12, x + 32 + dir_dx(dir) * 7, y - 7, 0.92, 0.3, 0.26);
+  tri(x + 32, y + 12, x + 46, y + 12, x + 32 + dir_dx(dir) * 7, y - 7, 0.78, 0.22, 0.2);
+  quad(x + 16, y + 11, 32, 4, 0.7, 0.2, 0.2);
+  tri(x + 32 + dir_dx(dir) * 7, y - 11, x + 28 + dir_dx(dir) * 7, y - 5, x + 36 + dir_dx(dir) * 7, y - 5, 0.99, 0.9, 0.5);
   quad(x + 24 + ex, y + 20 + ey, 5, eye, 0.1, 0.1, 0.16);
   quad(x + 35 + ex, y + 20 + ey, 5, eye, 0.1, 0.1, 0.16);
   quad(x + 22, y + 26, 5, 3, 0.95, 0.6, 0.5);
@@ -1120,12 +1258,13 @@ fn sparkles(cx, cy, t) {
     let y = cy + SPARK_VY[i] * t + 0.09 * t * t;
     let size = 10 - t * 0.17 - i % 3;
     if (size > 0) {
+      let spin = t * 0.22 * (i % 2 * 2 - 1) + i;
       if (i % 3 == 0) {
-        diamond(x, y, size, 0.95, 0.74, 0.25);
+        rtri(x, y, size * 1.4, spin, 0.95, 0.74, 0.25);
       } else if (i % 3 == 1) {
         diamond(x, y, size, 0.34, 0.84, 0.5);
       } else {
-        diamond(x, y, size, 0.85, 1, 0.9);
+        rtri(x, y, size * 1.3, spin, 0.85, 1, 0.9);
       }
     }
     i = i + 1;
@@ -1153,19 +1292,19 @@ fn draw_card(index) {
       }
       x = x + wobble;
     }
-    quad(x + 8, y + 12, CARD_W, CARD_H, 0.03, 0.04, 0.08);
+    chamfer(x + 8, y + 12, CARD_W, CARD_H, 18, 0.03, 0.04, 0.08);
     if (index < unlocked) {
-      quad(x, y, CARD_W, CARD_H, 0.13, 0.2, 0.33);
-      quad(x, y, CARD_W, 6, 0.3, 0.42, 0.62);
-      quad(x, y + CARD_H - 6, CARD_W, 6, 0.08, 0.12, 0.22);
+      chamfer(x, y, CARD_W, CARD_H, 18, 0.13, 0.2, 0.33);
+      quad(x + 18, y, CARD_W - 36, 6, 0.3, 0.42, 0.62);
+      quad(x + 18, y + CARD_H - 6, CARD_W - 36, 6, 0.08, 0.12, 0.22);
       text(TEXT_LEVEL_FIRST + index, x + CARD_W / 2, y + 54, 30, TONE_WHITE);
       let k = 0;
       while (k < 3) {
         if (k < best_stars[index]) {
-          diamond(x + 60 + k * 40, y + 84, 15, 0.5, 0.36, 0.1);
-          diamond(x + 60 + k * 40, y + 84, 12, 0.97, 0.78, 0.26);
+          star(x + 60 + k * 40, y + 84, 19, 8, 0, 0.5, 0.36, 0.1);
+          star(x + 60 + k * 40, y + 84, 16, 7, 0, 0.97, 0.78, 0.26);
         } else {
-          diamond(x + 60 + k * 40, y + 84, 12, 0.08, 0.13, 0.24);
+          star(x + 60 + k * 40, y + 84, 15, 6.5, 0, 0.08, 0.13, 0.24);
         }
         k = k + 1;
       }
@@ -1174,8 +1313,8 @@ fn draw_card(index) {
         number(x + 92, y + 103, best_moves[index], 0.8, 0.88, 1);
       }
     } else {
-      quad(x, y, CARD_W, CARD_H, 0.08, 0.1, 0.17);
-      quad(x, y, CARD_W, 6, 0.15, 0.18, 0.28);
+      chamfer(x, y, CARD_W, CARD_H, 18, 0.08, 0.1, 0.17);
+      quad(x + 18, y, CARD_W - 36, 6, 0.15, 0.18, 0.28);
       draw_lock(x + CARD_W / 2, y + 56);
       text(TEXT_LOCKED, x + CARD_W / 2, y + 112, 22, TONE_MUTED);
     }
@@ -1202,6 +1341,10 @@ fn menu_scene() {
   quad(x, y + h - 5, w, 5, 0.95, 0.74, 0.25);
   quad(x, y, 5, h, 0.95, 0.74, 0.25);
   quad(x + w - 5, y, 5, h, 0.95, 0.74, 0.25);
+  tri(x - 6, y - 6, x + 22, y - 6, x - 6, y + 22, 0.95, 0.74, 0.25);
+  tri(x + w + 6, y - 6, x + w - 22, y - 6, x + w + 6, y + 22, 0.95, 0.74, 0.25);
+  tri(x - 6, y + h + 6, x + 22, y + h + 6, x - 6, y + h - 22, 0.95, 0.74, 0.25);
+  tri(x + w + 6, y + h + 6, x + w - 22, y + h + 6, x + w + 6, y + h - 22, 0.95, 0.74, 0.25);
   if (menu_t >= 40) {
     text(TEXT_MENU_HINT, 400, 574, 20, TONE_MUTED);
   }
@@ -1228,11 +1371,12 @@ fn clear_scene() {
       let pop = ease_back(clamp01((t - 10 - i * 8) / STAR_POP_TICKS));
       let sx = 300 + i * 100;
       if (i < stars) {
-        diamond(sx, 288 - drop, 28 * pop, 0.5, 0.36, 0.1);
-        diamond(sx, 288 - drop, 23 * pop, 0.97, 0.78, 0.26);
-        diamond(sx, 288 - drop, 11 * pop, 1, 0.94, 0.62);
+        let spin = (1 - pop) * 1.6;
+        star(sx, 290 - drop, 38 * pop, 16 * pop, spin, 0.5, 0.36, 0.1);
+        star(sx, 290 - drop, 32 * pop, 14 * pop, spin, 0.97, 0.78, 0.26);
+        star(sx, 290 - drop, 15 * pop, 7 * pop, spin, 1, 0.94, 0.62);
       } else {
-        diamond(sx, 288 - drop, 22, 0.08, 0.2, 0.15);
+        star(sx, 290 - drop, 27, 12, 0, 0.08, 0.2, 0.15);
       }
       i = i + 1;
     }
@@ -1249,10 +1393,10 @@ fn clear_scene() {
 
 fn win_scene() {
   overlay_panel(0.14, 0.2, 0.34, 0);
-  diamond(300, 300, 36 + wave(80, 0) * 4, 0.95, 0.74, 0.25);
-  diamond(400, 300, 52 + wave(60, 0) * 5, 0.34, 0.84, 0.5);
-  diamond(500, 300, 36 + wave(80, 20) * 4, 0.95, 0.74, 0.25);
-  diamond(400, 300, 24, 0.8, 1, 0.9);
+  star(300, 304, 40 + wave(80, 0) * 4, 17, clock * 0.01, 0.95, 0.74, 0.25);
+  star(400, 300, 58 + wave(60, 0) * 5, 25, -clock * 0.012, 0.34, 0.84, 0.5);
+  star(500, 304, 40 + wave(80, 20) * 4, 17, clock * 0.01, 0.95, 0.74, 0.25);
+  star(400, 300, 26, 11, clock * 0.02, 0.8, 1, 0.9);
   text(TEXT_FINISHED, 400, 244, 34, TONE_GOLD);
   text(TEXT_BACK, 400, 372, 19, TONE_WHITE);
   sparkles(250, 300, clock % 90);
@@ -1260,9 +1404,36 @@ fn win_scene() {
   sparkles(550, 300, (clock + 60) % 90);
 }
 
+// Spinning shards, shrinking as they fade. They are screen-space and drawn
+// over everything.
+fn particles_scene() {
+  let i = 0;
+  while (i < PART_COUNT) {
+    if (part_life[i] > 0) {
+      let left = part_life[i] / part_max[i];
+      let size = 3 + left * 8;
+      let kind = part_kind[i];
+      if (kind == PART_MIXED) {
+        kind = i % 3;
+      }
+      if (kind == PART_GOLD) {
+        rtri(part_x[i], part_y[i], size, part_a[i], 0.97, 0.78 + left * 0.2, 0.26 + left * 0.3);
+      } else if (kind == PART_GREEN) {
+        rtri(part_x[i], part_y[i], size, part_a[i], 0.34, 0.84, 0.5);
+      } else if (kind == PART_WOOD) {
+        rtri(part_x[i], part_y[i], size * 0.6, part_a[i], 0.82, 0.55, 0.26);
+      } else {
+        rtri(part_x[i], part_y[i], size, part_a[i], 0.85, 1, 0.9);
+      }
+    }
+    i = i + 1;
+  }
+}
+
 fn scene() {
   if (state == STATE_MENU) {
     menu_scene();
+    particles_scene();
     return;
   }
   background();
@@ -1276,6 +1447,7 @@ fn scene() {
   if (state == STATE_WON) {
     win_scene();
   }
+  particles_scene();
 }
 
 fn frame() {
