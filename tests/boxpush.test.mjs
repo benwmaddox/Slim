@@ -17,14 +17,15 @@ function numbers(name) {
 }
 
 const LEVEL_COUNT = 6;
-const CLEAR_READY = 40;
-const MOVE_TICKS = 9;
+const CLEAR_READY = 44;
+const MOVE_TICKS = 10;
 const map = numbers('LEVEL_MAP');
 const boxes = numbers('LEVEL_BOX');
 const starts = numbers('LEVEL_START');
 const widths = numbers('LEVEL_W');
 const heights = numbers('LEVEL_H');
 const boxCounts = numbers('LEVEL_BOXES');
+const pars = numbers('LEVEL_PAR');
 const levels = Array.from({length: LEVEL_COUNT}, (_, n) => decodeLevel(
   map.slice(n * CELLS, (n + 1) * CELLS),
   boxes.slice(n * CELLS, (n + 1) * CELLS),
@@ -41,7 +42,14 @@ fn frame() {
   boxpush_frame();
   sound(99, player, current_level);
   sound(98, state, covered);
-  sound(97, crate[0], 0);
+  sound(97, hist_len, stars);
+  let sum = 0;
+  let i = 0;
+  while (i < CELLS) {
+    sum = sum + crate[i] * (i + 1);
+    i = i + 1;
+  }
+  sound(96, sum, best_moves[current_level]);
 }`;
 }
 
@@ -77,6 +85,10 @@ function makeRuntime(backend = 'wasm') {
       level: find(99)[2],
       state: find(98)[1],
       covered: find(98)[2],
+      moves: find(97)[1],
+      stars: find(97)[2],
+      crates: find(96)[1],
+      best: find(96)[2],
     };
   }
   game.init();
@@ -213,7 +225,7 @@ test('holding a key repeats moves after a delay; a tap moves exactly once', () =
 test('the game draws finite, bounded triangles in every state', () => {
   const runtime = makeRuntime('wasm');
   const check = (frame, label) => {
-    assert.ok(frame.triangles.length > 0 && frame.triangles.length <= 1200, `${label}: ${frame.triangles.length} triangles`);
+    assert.ok(frame.triangles.length > 0 && frame.triangles.length <= 2500, `${label}: ${frame.triangles.length} triangles`);
     for (const t of frame.triangles) {
       assert.equal(t.length, 9);
       assert.ok(t.every(Number.isFinite), `${label}: finite`);
@@ -261,7 +273,7 @@ test('the porter glides into the new cell over several ticks and then rests', ()
   assert.ok(Math.abs(xs.at(-1) - (startX + 64)) < 1e-3, 'settles exactly one cell over');
   // Ease-out: the early steps are bigger than the last ones.
   assert.ok(xs[2] - xs[1] > xs[MOVE_TICKS] - xs[MOVE_TICKS - 1], 'decelerates');
-  assert.ok(Math.abs(porterY(runtime.frame()) - startY) < 1e-3, 'back on the ground after the hop');
+  assert.ok(Math.abs(porterY(runtime.frame()) - startY) < 2, 'back on the ground after the hop (breathing moves it under 2 px)');
 });
 
 test('a blocked move shakes the porter in place and then settles', () => {
@@ -273,8 +285,8 @@ test('a blocked move shakes the porter in place and then settles', () => {
   const restY = porterY(against);
   const ys = [porterY(runtime.tap('up'))];
   for (let i = 0; i < 9; i += 1) ys.push(porterY(runtime.frame()));
-  assert.ok(ys.some((y) => Math.abs(y - restY) > 0.5), 'shakes while blocked');
-  assert.ok(Math.abs(ys.at(-1) - restY) < 1e-3, 'settles back');
+  assert.ok(ys.some((y) => Math.abs(y - restY) > 2.5), 'shakes while blocked');
+  assert.ok(Math.abs(ys.at(-1) - restY) < 2, 'settles back (breathing moves it under 2 px)');
   assert.equal(porterX(runtime.frame()), restX, 'a vertical bump has no sideways drift');
 });
 
@@ -296,4 +308,132 @@ test('the clear sound and win panel animate: confetti appears and moves', () => 
   const d = runtime.wait(7);
   assert.equal(c.state, 2);
   assert.notDeepEqual(c.triangles, d.triangles, 'the win scene keeps animating');
+});
+
+// Level 1: start (1,2), crate (3,2), target (5,3), room x 1..5, y 1..3.
+function stuckCrateTriangles(frame) {
+  // The warning crate face is the only quad with this red, throbbing face colour.
+  return frame.triangles.filter((t) => t[6] >= 0.7 && t[6] <= 0.93 && Math.abs(t[7] - 0.28) < 0.01 && Math.abs(t[8] - 0.28) < 0.01);
+}
+
+test('undo takes back walks and pushes, and counts moves', () => {
+  const runtime = makeRuntime('wasm');
+  const start = runtime.wait(60);
+  assert.equal(start.moves, 0);
+  const initialCrates = start.crates;
+  runtime.tap('right');
+  runtime.tap('right');
+  const pushed = runtime.tap('right');
+  assert.equal(pushed.moves, 3, 'two steps and a push');
+  assert.notEqual(pushed.crates, initialCrates, 'the crate moved');
+  runtime.tap('left');
+  assert.equal(runtime.frame().moves, 4, 'a step back counts');
+  // Undo everything, one press at a time.
+  for (let i = 0; i < 4; i += 1) {
+    runtime.frame({4: 1, 5: 1});
+    runtime.frame();
+  }
+  const back = runtime.wait(20);
+  assert.equal(back.moves, 0);
+  assert.equal(back.player, levels[0].start, 'player is back at the start');
+  assert.equal(back.crates, initialCrates, 'crate is back at its starting cell');
+  assert.equal(runtime.frame({4: 1, 5: 1}).moves, 0, 'undo with no history does nothing');
+});
+
+test('holding Space keeps undoing, and blocked moves are not counted', () => {
+  const runtime = makeRuntime('wasm');
+  runtime.wait(60);
+  for (const dir of ['right', 'down', 'down', 'down']) runtime.tap(dir);
+  const walked = runtime.wait(3).moves;
+  assert.equal(walked, 2, 'the second down walked into the bottom wall and was not counted');
+  runtime.frame({4: 1, 5: 1});
+  assert.equal(runtime.frame({4: 1}).moves, 1, 'first undo applies at once');
+  let moves = 1;
+  for (let i = 0; i < 40 && moves > 0; i += 1) moves = runtime.frame({4: 1}).moves;
+  assert.equal(moves, 0, 'holding Space repeats the undo');
+});
+
+test('undo slides the porter back instead of jumping', () => {
+  const runtime = makeRuntime('wasm');
+  const rest = runtime.wait(60);
+  const startX = porterX(rest);
+  runtime.tap('right');
+  const moved = runtime.wait(20);
+  assert.ok(Math.abs(porterX(moved) - (startX + 64)) < 1e-3);
+  const first = porterX(runtime.frame({4: 1, 5: 1}));
+  assert.ok(Math.abs(first - (startX + 64)) < 1e-3, 'starts where it stood');
+  const xs = [first];
+  for (let i = 0; i < MOVE_TICKS + 1; i += 1) xs.push(porterX(runtime.frame()));
+  for (let i = 1; i < xs.length; i += 1) assert.ok(xs[i] <= xs[i - 1] + 1e-6, 'slides back, never forward');
+  assert.ok(Math.abs(xs.at(-1) - startX) < 1e-3, 'settles in the old cell');
+});
+
+test('stars follow the move count and the best finish is remembered', () => {
+  const runtime = makeRuntime('wasm');
+  const solution = solve(levels[0]).moves;
+  // Detours of up/down steps in the open part of the room cost extra moves.
+  const play = (detours) => {
+    let result = runtime.frame();
+    for (let i = 0; i < detours; i += 1) result = runtime.tap(i % 2 ? 'down' : 'up');
+    if (detours % 2) result = runtime.tap('down');
+    for (const dir of solution) result = runtime.tap(dir);
+    assert.equal(result.state, 1, 'the level is cleared');
+    return result;
+  };
+  const best = play(0);
+  assert.equal(best.stars, 3, 'the reference solution earns three stars');
+  assert.equal(best.moves, pars[0]);
+  assert.equal(best.best, pars[0]);
+
+  runtime.restart();
+  runtime.wait(60);
+  assert.equal(runtime.frame().moves, 0, 'restart clears the move counter');
+  assert.equal(runtime.frame().best, pars[0], 'the best finish survives a restart');
+
+  const okay = play(6);
+  assert.ok(okay.moves > pars[0] * 1.5 && okay.moves <= pars[0] * 2.5, `${okay.moves} moves`);
+  assert.equal(okay.stars, 2, 'a detour costs the third star');
+  assert.equal(okay.best, pars[0], 'a worse finish does not replace the best');
+
+  runtime.restart();
+  runtime.wait(60);
+  const slow = play(14);
+  assert.ok(slow.moves > pars[0] * 2.5);
+  assert.equal(slow.stars, 1, 'a long detour still earns one star');
+  assert.equal(slow.best, pars[0]);
+});
+
+test('a crate pushed into a corner is flagged as stuck', () => {
+  const runtime = makeRuntime('wasm');
+  const settled = runtime.wait(60);
+  assert.equal(stuckCrateTriangles(settled).length, 0, 'no warning at the start');
+  // Push the crate up against the top wall, then left into the corner (1,1).
+  for (const dir of ['down', 'right', 'right', 'up', 'right', 'up', 'left', 'left']) runtime.tap(dir);
+  const after = runtime.wait(40);
+  assert.ok(stuckCrateTriangles(after).length > 0, 'the cornered crate is drawn in the warning colour');
+  // Undo repairs it and the warning goes away.
+  runtime.frame({4: 1, 5: 1});
+  runtime.frame();
+  runtime.wait(40);
+  assert.equal(stuckCrateTriangles(runtime.wait(1)).length, 0, 'warning cleared after undo');
+});
+
+test('frames stay light enough to run at 60 Hz', () => {
+  const runtime = makeRuntime('wasm');
+  let most = 0;
+  const started = process.hrtime.bigint();
+  let frames = 0;
+  levels.forEach((level) => {
+    for (const dir of solve(level).moves) {
+      const result = runtime.tap(dir);
+      most = Math.max(most, result.triangles.length, result.after.triangles.length);
+      frames += 2;
+    }
+    for (let t = 0; t < CLEAR_READY + 10; t += 1) { most = Math.max(most, runtime.frame().triangles.length); frames += 1; }
+    runtime.space();
+  });
+  const millis = Number(process.hrtime.bigint() - started) / 1e6;
+  console.log(`most triangles in a frame: ${most}; ${frames} frames in ${millis.toFixed(0)} ms (${(millis / frames).toFixed(3)} ms/frame including the test host)`);
+  assert.ok(most <= 2500);
+  assert.ok(millis / frames < 5, 'well under the 16.7 ms frame budget');
 });

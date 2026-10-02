@@ -123,22 +123,31 @@ npm run build:boxpush
 
 Crate Shift is a six-level push-only puzzle. Move with the arrows or WASD and
 push crates onto the gold diamonds; crates can only be pushed, never pulled, and
-only one at a time. R restarts the level and Space continues after a clear.
+only one at a time. Space undoes the last move (hold it to keep undoing), R
+restarts the level, and Space also continues after a clear. The counter at the
+top left shows moves taken; clearing a level awards one to three stars against a
+reference solution and remembers your best finish for the session. A crate
+pushed into a corner it can never leave throbs red, so a dead end is obvious.
 The source is [examples/boxpush.slim](examples/boxpush.slim); each level is a
 flat 9x8 grid with its ASCII layout kept in comments.
 
 Everything that moves is animated without changing game logic: levels drop in as
-a diagonal wave, the porter glides and hops between cells (crates slide with
-them), a blocked move shakes, a crate landing on a target sends out a ring, and a
-cleared level drops in a panel and throws confetti. Game state changes instantly;
-the animation timers only decide how far drawing lags behind, so input is never
+a diagonal wave that dips and settles, the porter glides with an ease-out and a
+parabolic hop (crates slide with them, undo slides them back), dust puffs kick up
+at each step, a blocked move shakes, a crate landing on a target sends out a
+ring, and a cleared level jolts the view, drops in a bouncing panel, pops the
+stars, and throws confetti. The backdrop has twinkling stars, banded sky and
+vignette, and every tile casts a shadow. Game state changes instantly; the
+animation timers only decide how far drawing lags behind, so input is never
 delayed.
 
 `tools/boxpush-solver.mjs` is an independent breadth-first solver (fewest
 pushes). `tests/boxpush.test.mjs` decodes the levels straight out of the Slim
 source, proves each is solvable, and replays every solution through real input
-in WASM, native JS, and f32 JS until the win screen. Solutions are 3, 8, 12, 16,
-16, and 18 pushes. The same tests check the animation timing.
+in WASM, native JS, and f32 JS until the win screen. Solutions need 3, 8, 12, 20,
+26, and 35 pushes. The same tests check undo, stars, the stuck-crate warning, and
+the animation timing. Levels 4 to 6 came from hill-climbing random layouts toward
+more pushes with the same solver.
 
 ## Procedural animals example
 

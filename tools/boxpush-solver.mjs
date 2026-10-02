@@ -42,6 +42,15 @@ export function isSolved(level, boxes) {
   return boxes.every((b) => level.map[b] === TARGET);
 }
 
+// A crate pushed into a corner (walls on two perpendicular sides) that is not a
+// target can never move again, so the search can drop that state. This only
+// removes unsolvable states, so the fewest-pushes answer is unchanged.
+function frozenInCorner(level, cell) {
+  if (level.map[cell] === TARGET) return false;
+  const blocked = (d) => level.map[cell + d] !== FLOOR && level.map[cell + d] !== TARGET;
+  return (blocked(-1) || blocked(1)) && (blocked(-STRIDE) || blocked(STRIDE));
+}
+
 function reach(level, player, boxSet) {
   const seen = new Map([[player, null]]);
   const queue = [player];
@@ -86,6 +95,7 @@ export function solve(level, limit = 3_000_000) {
           const from = box - d, to = box + d;
           const kind = level.map[to];
           if (!seen.has(from) || state.boxes.has(to) || (kind !== FLOOR && kind !== TARGET)) continue;
+          if (frozenInCorner(level, to)) continue;
           const boxes = new Set(state.boxes);
           boxes.delete(box);
           boxes.add(to);

@@ -1,10 +1,11 @@
 // title: Crate Shift
-// footer: Arrows/WASD: move and push crates · R: restart level · Space: continue
+// footer: Arrows/WASD: move and push crates · Space: undo · R: restart level
 const LEVEL_COUNT = 6;
 const STRIDE = 9;
 const ROWS = 8;
 const CELLS = 72;
 const TILE = 64;
+const HISTORY = 2048;
 
 const TILE_WALL = 1;
 const TILE_FLOOR = 2;
@@ -23,6 +24,7 @@ const INPUT_LEFT = 0;
 const INPUT_RIGHT = 1;
 const INPUT_UP = 2;
 const INPUT_DOWN = 3;
+const INPUT_ACTION_HELD = 4;
 const INPUT_ACTION_PRESSED = 5;
 const INPUT_RESTART = 9;
 
@@ -34,23 +36,44 @@ const SOUND_CLEAR = 4;
 
 const FIRST_REPEAT = 14;
 const NEXT_REPEAT = 6;
+const UNDO_FIRST_REPEAT = 16;
+const UNDO_NEXT_REPEAT = 5;
 
 // Animation lengths, in 60 Hz ticks. Game state always changes instantly; the
 // timers below only decide how far drawing lags behind it.
-const MOVE_TICKS = 9;
-const BUMP_TICKS = 7;
-const PULSE_TICKS = 20;
-const INTRO_DROP_TICKS = 12;
-const CLEAR_PANEL_DELAY = 22;
-const CLEAR_READY = 40;
+const MOVE_TICKS = 10;
+const BUMP_TICKS = 8;
+const PULSE_TICKS = 22;
+const SHAKE_TICKS = 12;
+const PUFF_TICKS = 20;
+const INTRO_DROP_TICKS = 16;
+const INTRO_STAGGER = 1.6;
+const CLEAR_PANEL_TICKS = 24;
+const CLEAR_PANEL_DELAY = 20;
+const CLEAR_READY = 44;
+const STAR_POP_TICKS = 16;
+const PUFF_COUNT = 8;
+
+// Moves needed for three stars, as a multiple of the reference solution.
+const THREE_STAR_FACTOR = 1.5;
+const TWO_STAR_FACTOR = 2.5;
 
 const SPARK_COUNT = 14;
 const SPARK_VX = [-4.2, -3.4, -2.6, -1.9, -1.2, -0.6, -0.2, 0.2, 0.6, 1.2, 1.9, 2.6, 3.4, 4.2];
 const SPARK_VY = [-6.5, -8.5, -5.5, -9.5, -7, -10, -6, -6.5, -10, -7.5, -9.5, -5.5, -8, -6];
 
+const STAR_COUNT = 26;
+const STAR_X = [34, 96, 150, 212, 268, 330, 392, 455, 512, 570, 636, 700, 764, 60, 180, 300, 420, 540, 660, 740, 120, 240, 480, 600, 20, 780];
+const STAR_Y = [40, 120, 70, 160, 30, 100, 150, 50, 120, 36, 90, 150, 60, 520, 560, 500, 570, 530, 560, 510, 400, 450, 470, 430, 300, 260];
+
+// Seven-segment digits: bit 0 top, 1 upper right, 2 lower right, 3 bottom,
+// 4 lower left, 5 upper left, 6 middle.
+const SEGMENTS = [63, 6, 91, 79, 102, 109, 125, 7, 127, 111];
+
 // Levels are stored as flat 9x8 grids, one after another. LEVEL_MAP holds the
 // fixed terrain (0 void, 1 wall, 2 floor, 3 target); LEVEL_BOX marks where the
-// crates start. Crates can only be pushed, never pulled.
+// crates start. LEVEL_PAR is the length of a reference solution. Crates can
+// only be pushed, never pulled.
 // Level 1
 //   #######
 //   #     #
@@ -74,27 +97,28 @@ const SPARK_VY = [-6.5, -8.5, -5.5, -9.5, -7, -10, -6, -6.5, -10, -7.5, -9.5, -5
 //   #########
 // Level 4
 //   #########
-//   #  @  o##
-//   # B B  o#
-//   #      ##
-//   # B##  ##
-//   #   #  o#
+//   ##@B   o#
+//   ## B  # #
+//   #  #B   #
+//   #ooB  B##
+//   #o  #o  #
 //   #########
 // Level 5
 //   #########
-//   ###  o+ #
-//   #  ##BB #
-//   #     B##
-//   # Bo##  #
-//   #      o#
+//   # o    ##
+//   #B #@  ##
+//   # B## ###
+//   #o # Bo #
+//   #  B    #
+//   #o ## ###
 //   #########
 // Level 6
 //   #########
-//   #o    B #
-//   #o##  B@#
-//   #o  o B #
-//   #   B  ##
-//   #      ##
+//   #oo   B #
+//   # #   o #
+//   # #B #o##
+//   # B B@###
+//   # #    ##
 //   #########
 const LEVEL_MAP = [
   1, 1, 1, 1, 1, 1, 1, 0, 0,
@@ -122,27 +146,27 @@ const LEVEL_MAP = [
   1, 1, 1, 1, 1, 1, 1, 1, 1,
   0, 0, 0, 0, 0, 0, 0, 0, 0,
   1, 1, 1, 1, 1, 1, 1, 1, 1,
-  1, 2, 2, 2, 2, 2, 3, 1, 1,
-  1, 2, 2, 2, 2, 2, 2, 3, 1,
-  1, 2, 2, 2, 2, 2, 2, 1, 1,
-  1, 2, 2, 1, 1, 2, 2, 1, 1,
-  1, 2, 2, 2, 1, 2, 2, 3, 1,
+  1, 1, 2, 2, 2, 2, 2, 3, 1,
+  1, 1, 2, 2, 2, 2, 1, 2, 1,
+  1, 2, 2, 1, 2, 2, 2, 2, 1,
+  1, 3, 3, 2, 2, 2, 2, 1, 1,
+  1, 3, 2, 2, 1, 3, 2, 2, 1,
   1, 1, 1, 1, 1, 1, 1, 1, 1,
   0, 0, 0, 0, 0, 0, 0, 0, 0,
   1, 1, 1, 1, 1, 1, 1, 1, 1,
-  1, 1, 1, 2, 2, 3, 3, 2, 1,
-  1, 2, 2, 1, 1, 2, 2, 2, 1,
-  1, 2, 2, 2, 2, 2, 2, 1, 1,
-  1, 2, 2, 3, 1, 1, 2, 2, 1,
-  1, 2, 2, 2, 2, 2, 2, 3, 1,
+  1, 2, 3, 2, 2, 2, 2, 1, 1,
+  1, 2, 2, 1, 2, 2, 2, 1, 1,
+  1, 2, 2, 1, 1, 2, 1, 1, 1,
+  1, 3, 2, 1, 2, 2, 3, 2, 1,
+  1, 2, 2, 2, 2, 2, 2, 2, 1,
+  1, 3, 2, 1, 1, 2, 1, 1, 1,
   1, 1, 1, 1, 1, 1, 1, 1, 1,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
   1, 1, 1, 1, 1, 1, 1, 1, 1,
-  1, 3, 2, 2, 2, 2, 2, 2, 1,
-  1, 3, 1, 1, 2, 2, 2, 2, 1,
-  1, 3, 2, 2, 3, 2, 2, 2, 1,
-  1, 2, 2, 2, 2, 2, 2, 1, 1,
-  1, 2, 2, 2, 2, 2, 2, 1, 1,
+  1, 3, 3, 2, 2, 2, 2, 2, 1,
+  1, 2, 1, 2, 2, 2, 3, 2, 1,
+  1, 2, 1, 2, 2, 1, 3, 1, 1,
+  1, 2, 2, 2, 2, 2, 1, 1, 1,
+  1, 2, 1, 2, 2, 2, 2, 1, 1,
   1, 1, 1, 1, 1, 1, 1, 1, 1,
   0, 0, 0, 0, 0, 0, 0, 0, 0
 ];
@@ -172,34 +196,35 @@ const LEVEL_BOX = [
   0, 0, 0, 0, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 1, 0, 1, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 1, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 1, 1, 0, 0,
-  0, 0, 0, 0, 0, 0, 1, 0, 0,
-  0, 0, 1, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 1, 0, 0,
-  0, 0, 0, 0, 0, 0, 1, 0, 0,
-  0, 0, 0, 0, 0, 0, 1, 0, 0,
+  0, 0, 0, 1, 0, 0, 0, 0, 0,
+  0, 0, 0, 1, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 1, 0, 0, 0, 0,
+  0, 0, 0, 1, 0, 0, 1, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 1, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 1, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 1, 0, 0, 0,
+  0, 0, 0, 1, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 1, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 1, 0, 0, 0, 0, 0,
+  0, 0, 1, 0, 1, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0, 0, 0, 0
 ];
-const LEVEL_START = [19, 20, 49, 12, 15, 25];
+const LEVEL_START = [19, 20, 49, 11, 22, 41];
 const LEVEL_W = [7, 8, 9, 9, 9, 9];
-const LEVEL_H = [5, 6, 7, 7, 7, 7];
-const LEVEL_BOXES = [1, 2, 3, 3, 4, 4];
+const LEVEL_H = [5, 6, 7, 7, 8, 7];
+const LEVEL_BOXES = [1, 2, 3, 5, 4, 4];
+const LEVEL_PAR = [6, 36, 36, 106, 118, 185];
 
 global current_level = 0;
 global state = STATE_PLAY;
@@ -207,10 +232,18 @@ global player = 0;
 global facing = DIR_DOWN;
 global last_dir = -1;
 global repeat = 0;
+global undo_hold = 0;
 global covered = 0;
+global stars = 0;
 global origin_x = 0;
 global origin_y = 0;
+global view_x = 0;
+global view_y = 0;
 global crate = [0; CELLS];
+global best_moves = [0; LEVEL_COUNT];
+global hist_dir = [0; HISTORY];
+global hist_push = [0; HISTORY];
+global hist_len = 0;
 
 // Animation state (see the lengths above).
 global clock = 0;
@@ -223,6 +256,11 @@ global bump_t = 0;
 global bump_dir = DIR_DOWN;
 global pulse_t = 0;
 global pulse_cell = 0;
+global shake_t = 0;
+global puff_next = 0;
+global puff_x = [0; PUFF_COUNT];
+global puff_y = [0; PUFF_COUNT];
+global puff_life = [0; PUFF_COUNT];
 
 fn tile_at(index) {
   return LEVEL_MAP[current_level * CELLS + index];
@@ -267,9 +305,32 @@ fn dir_delta(dir) {
   return dir_dx(dir) + dir_dy(dir) * STRIDE;
 }
 
-// 0 -> 1 -> 0 triangle wave over `period` ticks, used for gentle pulsing.
-fn wave(period) {
-  return 1 - abs(2 * (clock % period) / period - 1);
+fn reverse(dir) {
+  if (dir % 2 == 0) {
+    return dir + 1;
+  }
+  return dir - 1;
+}
+
+// 0 -> 1 -> 0 triangle wave over `period` ticks, shifted by `phase`.
+fn wave(period, phase) {
+  return 1 - abs(2 * ((clock + phase) % period) / period - 1);
+}
+
+fn clamp01(value) {
+  return min(max(value, 0), 1);
+}
+
+// Fast start, gentle stop: used for gliding.
+fn ease_out(p) {
+  let q = 1 - p;
+  return 1 - q * q * q;
+}
+
+// Overshoots a little past 1 and settles back: used for things that drop in.
+fn ease_back(p) {
+  let q = p - 1;
+  return 1 + 2.70158 * q * q * q + 1.70158 * q * q;
 }
 
 fn count_covered() {
@@ -284,6 +345,19 @@ fn count_covered() {
   return total;
 }
 
+// A crate in a corner that is not a target can never be pushed again.
+fn crate_stuck(index) {
+  if (tile_at(index) == TILE_TARGET) {
+    return 0;
+  }
+  let side = walkable(index - 1) == 0 || walkable(index + 1) == 0;
+  let end = walkable(index - STRIDE) == 0 || walkable(index + STRIDE) == 0;
+  if (side && end) {
+    return 1;
+  }
+  return 0;
+}
+
 fn load_level(level) {
   current_level = level;
   state = STATE_PLAY;
@@ -291,17 +365,27 @@ fn load_level(level) {
   facing = DIR_DOWN;
   last_dir = -1;
   repeat = 0;
+  undo_hold = 30;
+  hist_len = 0;
   intro_t = 0;
   clear_t = 0;
   move_t = 0;
   bump_t = 0;
   pulse_t = 0;
+  shake_t = 0;
   push_cell = -1;
   origin_x = (800 - LEVEL_W[level] * TILE) / 2;
   origin_y = 66 + (500 - LEVEL_H[level] * TILE) / 2;
+  view_x = origin_x;
+  view_y = origin_y;
   let i = 0;
   while (i < CELLS) {
     crate[i] = LEVEL_BOX[level * CELLS + i];
+    i = i + 1;
+  }
+  i = 0;
+  while (i < PUFF_COUNT) {
+    puff_life[i] = 0;
     i = i + 1;
   }
   covered = count_covered();
@@ -311,23 +395,64 @@ fn init() {
   load_level(0);
 }
 
+fn record(dir, pushed) {
+  if (hist_len >= HISTORY) {
+    hist_len = 0;
+  }
+  hist_dir[hist_len] = dir;
+  hist_push[hist_len] = pushed;
+  hist_len = hist_len + 1;
+}
+
+// Two small clouds kicked up at the porter's feet when leaving a cell.
+fn spawn_puffs(cell) {
+  let x = origin_x + cell_col(cell) * TILE + 32;
+  let y = origin_y + cell_row(cell) * TILE + 56;
+  puff_x[puff_next] = x - 8;
+  puff_y[puff_next] = y;
+  puff_life[puff_next] = PUFF_TICKS;
+  puff_next = (puff_next + 1) % PUFF_COUNT;
+  puff_x[puff_next] = x + 8;
+  puff_y[puff_next] = y;
+  puff_life[puff_next] = PUFF_TICKS - 4;
+  puff_next = (puff_next + 1) % PUFF_COUNT;
+}
+
+fn finish_level() {
+  state = STATE_CLEAR;
+  clear_t = 0;
+  shake_t = SHAKE_TICKS;
+  let par = LEVEL_PAR[current_level];
+  stars = 1;
+  if (hist_len <= par * TWO_STAR_FACTOR) {
+    stars = 2;
+  }
+  if (hist_len <= par * THREE_STAR_FACTOR) {
+    stars = 3;
+  }
+  if (best_moves[current_level] == 0 || hist_len < best_moves[current_level]) {
+    best_moves[current_level] = hist_len;
+  }
+  sound(SOUND_CLEAR, 7, 0.14);
+}
+
 fn push_crate(to, beyond) {
   crate[to] = 0;
   crate[beyond] = 1;
+  spawn_puffs(player);
   player = to;
   move_t = MOVE_TICKS;
   push_cell = beyond;
+  record(move_dir, 1);
   covered = count_covered();
   if (tile_at(beyond) == TILE_TARGET) {
     pulse_t = PULSE_TICKS;
     pulse_cell = beyond;
   }
   if (covered == LEVEL_BOXES[current_level]) {
-    state = STATE_CLEAR;
-    clear_t = 0;
-    sound(SOUND_CLEAR, 7, 0.14);
+    finish_level();
   } else if (tile_at(beyond) == TILE_TARGET) {
-    sound(SOUND_LAND, 8, 0.09);
+    sound(SOUND_LAND, 6 + covered * 2, 0.09);
   } else {
     sound(SOUND_STEP, -2, 0.08);
   }
@@ -359,10 +484,35 @@ fn try_move(dir) {
     }
     return;
   }
+  spawn_puffs(player);
   player = to;
   move_t = MOVE_TICKS;
   push_cell = -1;
+  record(dir, 0);
   sound(SOUND_STEP, 4, 0.04);
+}
+
+// Take back the last move, including pulling a crate back into place.
+fn undo() {
+  if (hist_len <= 0) {
+    return;
+  }
+  hist_len = hist_len - 1;
+  let dir = hist_dir[hist_len];
+  let back = reverse(dir);
+  let delta = dir_delta(dir);
+  push_cell = -1;
+  if (hist_push[hist_len] == 1) {
+    crate[player + delta] = 0;
+    crate[player] = 1;
+    push_cell = player;
+    covered = count_covered();
+  }
+  player = player - delta;
+  facing = back;
+  move_dir = back;
+  move_t = MOVE_TICKS;
+  sound(SOUND_STEP, -4, 0.05);
 }
 
 fn read_dir() {
@@ -381,8 +531,31 @@ fn read_dir() {
   return -1;
 }
 
+// Space undoes one move, and repeats while held. Returns 1 if it handled the
+// frame.
+fn update_undo() {
+  if (input(INPUT_ACTION_PRESSED) > 0) {
+    undo_hold = UNDO_FIRST_REPEAT;
+    undo();
+    return 1;
+  }
+  if (input(INPUT_ACTION_HELD) > 0) {
+    undo_hold = undo_hold - 1;
+    if (undo_hold <= 0) {
+      undo_hold = UNDO_NEXT_REPEAT;
+      undo();
+    }
+    return 1;
+  }
+  undo_hold = 0;
+  return 0;
+}
+
 // A fresh press moves at once; holding the key repeats after a short delay.
 fn update_play() {
+  if (update_undo() == 1) {
+    return;
+  }
   let dir = read_dir();
   if (dir < 0) {
     last_dir = -1;
@@ -420,9 +593,22 @@ fn tick_animation() {
   move_t = max(move_t - 1, 0);
   bump_t = max(bump_t - 1, 0);
   pulse_t = max(pulse_t - 1, 0);
+  shake_t = max(shake_t - 1, 0);
   if (state == STATE_CLEAR) {
     clear_t = min(clear_t + 1, 1000);
   }
+  let i = 0;
+  while (i < PUFF_COUNT) {
+    puff_life[i] = max(puff_life[i] - 1, 0);
+    i = i + 1;
+  }
+  // The whole view jolts briefly when a level is cleared.
+  let jolt = shake_t * 0.5;
+  if (shake_t % 2 == 1) {
+    jolt = -jolt;
+  }
+  view_x = origin_x;
+  view_y = origin_y + jolt;
 }
 
 fn quad(x, y, w, h, r, g, b) {
@@ -447,50 +633,92 @@ fn diamond_ring(cx, cy, size, w, r, g, b) {
   tri(cx - size, cy, cx, cy - size + w, cx - size + w, cy, r, g, b);
 }
 
+// A flat ellipse made of one fan of triangles, used for soft contact shadows.
+fn blob(cx, cy, rx, ry, r, g, b) {
+  tri(cx - rx, cy, cx, cy - ry, cx + rx, cy, r, g, b);
+  tri(cx - rx, cy, cx + rx, cy, cx, cy + ry, r, g, b);
+  tri(cx - rx * 0.6, cy - ry * 0.8, cx + rx * 0.6, cy - ry * 0.8, cx, cy, r, g, b);
+  tri(cx - rx * 0.6, cy + ry * 0.8, cx + rx * 0.6, cy + ry * 0.8, cx, cy, r, g, b);
+}
+
+// A cheap per-cell number in 0..1 so floors and walls vary without any data.
+fn jitter(cx, cy) {
+  return ((cx * 7 + cy * 13 + cx * cy * 3) % 10) / 10;
+}
+
 fn background() {
-  quad(0, 0, 800, 600, 0.07, 0.08, 0.14);
-  tri(0, 600, 260, 300, 520, 600, 0.09, 0.1, 0.18);
-  tri(380, 600, 640, 240, 800, 600, 0.1, 0.12, 0.2);
+  quad(0, 0, 800, 100, 0.05, 0.06, 0.12);
+  quad(0, 100, 800, 120, 0.06, 0.07, 0.14);
+  quad(0, 220, 800, 140, 0.07, 0.08, 0.16);
+  quad(0, 360, 800, 130, 0.085, 0.095, 0.18);
+  quad(0, 490, 800, 110, 0.1, 0.11, 0.2);
+  tri(0, 600, 260, 330, 520, 600, 0.09, 0.1, 0.19);
+  tri(380, 600, 640, 270, 800, 600, 0.11, 0.12, 0.22);
+  tri(-80, 600, 120, 420, 320, 600, 0.12, 0.13, 0.23);
+  let i = 0;
+  while (i < STAR_COUNT) {
+    let size = 0.8 + wave(110, i * 17) * 2.2;
+    diamond(STAR_X[i], STAR_Y[i], size, 0.55, 0.62, 0.85);
+    i = i + 1;
+  }
+  // Dark corners pull the eye toward the board.
+  tri(0, 0, 150, 0, 0, 120, 0.03, 0.035, 0.07);
+  tri(800, 0, 650, 0, 800, 120, 0.03, 0.035, 0.07);
+  tri(0, 600, 150, 600, 0, 480, 0.03, 0.035, 0.07);
+  tri(800, 600, 650, 600, 800, 480, 0.03, 0.035, 0.07);
 }
 
 // Tiles drop in as a diagonal wave from the top-left corner. `age` is how long
 // this cell has been alive; a negative age means it has not appeared yet.
 fn cell_age(cx, cy) {
-  return intro_t - (cx + cy) * 1.5;
+  return intro_t - (cx + cy) * INTRO_STAGGER;
 }
 
+// Height above the resting place: a drop that dips just past it and recovers.
 fn cell_lift(age) {
   if (age >= INTRO_DROP_TICKS) {
     return 0;
   }
-  let left = INTRO_DROP_TICKS - age;
-  return left * left * 0.8;
+  return (1 - ease_back(age / INTRO_DROP_TICKS)) * 190;
 }
 
 fn draw_floor(x, y, cx, cy) {
+  let shade = jitter(cx, cy) * 0.025;
   if ((cx + cy) % 2 == 0) {
-    quad(x, y, TILE, TILE, 0.17, 0.23, 0.3);
+    quad(x, y, TILE, TILE, 0.17 + shade, 0.23 + shade, 0.3 + shade);
   } else {
-    quad(x, y, TILE, TILE, 0.15, 0.2, 0.27);
+    quad(x, y, TILE, TILE, 0.15 + shade, 0.2 + shade, 0.27 + shade);
+  }
+  quad(x, y, TILE, 2, 0.26, 0.33, 0.41);
+  quad(x, y, 2, TILE, 0.22, 0.29, 0.37);
+  quad(x, y + TILE - 2, TILE, 2, 0.1, 0.14, 0.2);
+  quad(x + TILE - 2, y, 2, TILE, 0.1, 0.14, 0.2);
+  if (jitter(cx, cy) > 0.6) {
+    quad(x + 12 + jitter(cy, cx) * 30, y + 14 + jitter(cx, cx) * 30, 4, 3, 0.12, 0.17, 0.23);
   }
 }
 
-fn draw_wall(x, y, cy) {
-  quad(x, y, TILE, TILE, 0.2, 0.22, 0.34);
-  quad(x + 3, y + 3, TILE - 6, TILE - 12, 0.36, 0.4, 0.56);
-  quad(x + 3, y + 3, TILE - 6, 7, 0.52, 0.58, 0.74);
-  quad(x + 3, y + 30, TILE - 6, 3, 0.26, 0.29, 0.43);
-  quad(x + 20 + (cy % 2) * 24, y + 10, 3, 20, 0.26, 0.29, 0.43);
+fn draw_wall(x, y, cx, cy) {
+  let shade = jitter(cx, cy) * 0.04;
+  quad(x, y, TILE, TILE, 0.18, 0.2, 0.31);
+  quad(x + 3, y + 3, TILE - 6, TILE - 12, 0.34 + shade, 0.38 + shade, 0.54 + shade);
+  quad(x + 3, y + 3, TILE - 6, 7, 0.52, 0.58, 0.76);
+  quad(x + 3, y + 10, 3, TILE - 22, 0.42, 0.47, 0.63);
+  quad(x + TILE - 6, y + 10, 3, TILE - 22, 0.27, 0.3, 0.44);
+  quad(x + 3, y + 30, TILE - 6, 3, 0.25, 0.28, 0.42);
+  quad(x + 20 + (cy % 2) * 24, y + 10, 3, 20, 0.25, 0.28, 0.42);
+  quad(x + 14 + ((cy + 1) % 2) * 24, y + 33, 3, 18, 0.25, 0.28, 0.42);
 }
 
 fn draw_target(x, y) {
-  let glow = wave(90) * 2;
+  let glow = wave(90, 0) * 2;
+  diamond(x + 32, y + 32, 24 + glow, 0.2, 0.26, 0.3);
   diamond(x + 32, y + 32, 17 + glow, 0.95, 0.74, 0.25);
   diamond(x + 32, y + 32, 11 + glow, 0.12, 0.17, 0.23);
   diamond(x + 32, y + 32, 5, 0.95, 0.74, 0.25);
 }
 
-fn draw_crate(x, y, home) {
+fn draw_crate(x, y, home, stuck) {
   let dark_r = 0.42;
   let dark_g = 0.24;
   let dark_b = 0.12;
@@ -505,28 +733,56 @@ fn draw_crate(x, y, home) {
     lite_g = 0.84;
     lite_b = 0.5;
   }
-  quad(x + 7, y + 9, TILE - 10, TILE - 10, 0.08, 0.11, 0.16);
+  if (stuck == 1) {
+    // A stuck crate throbs red so a dead end is obvious before it costs a restart.
+    let warn = wave(40, 0);
+    dark_r = 0.42 + warn * 0.2;
+    dark_g = 0.12;
+    dark_b = 0.14;
+    lite_r = 0.72 + warn * 0.2;
+    lite_g = 0.28;
+    lite_b = 0.28;
+  }
+  blob(x + 33, y + 58, 28, 6, 0.06, 0.08, 0.12);
   quad(x + 5, y + 5, TILE - 10, TILE - 10, dark_r, dark_g, dark_b);
   quad(x + 9, y + 9, TILE - 18, TILE - 18, lite_r, lite_g, lite_b);
+  quad(x + 9, y + 21, TILE - 18, 2, dark_r, dark_g, dark_b);
+  quad(x + 9, y + 41, TILE - 18, 2, dark_r, dark_g, dark_b);
   quad(x + 9, y + 29, TILE - 18, 6, dark_r, dark_g, dark_b);
   quad(x + 29, y + 9, 6, TILE - 18, dark_r, dark_g, dark_b);
   quad(x + 9, y + 9, TILE - 18, 4, lite_r + 0.1, lite_g + 0.15, lite_b + 0.15);
+  quad(x + 9, y + TILE - 13, TILE - 18, 4, dark_r * 0.8, dark_g * 0.8, dark_b * 0.8);
+  quad(x + 12, y + 12, 4, 4, dark_r, dark_g, dark_b);
+  quad(x + TILE - 16, y + 12, 4, 4, dark_r, dark_g, dark_b);
+  quad(x + 12, y + TILE - 16, 4, 4, dark_r, dark_g, dark_b);
+  quad(x + TILE - 16, y + TILE - 16, 4, 4, dark_r, dark_g, dark_b);
 }
 
-// A small porter; the eyes slide toward the facing direction.
+// A small porter; the eyes slide toward the facing direction and blink now and
+// then. `lean` tips the upper body into a step.
 fn draw_player(x, y, dir) {
   let ex = dir_dx(dir) * 4;
   let ey = dir_dy(dir) * 3;
   if (dir == DIR_DOWN) {
     ey = 2;
   }
-  tri(x + 12, y + 56, x + 52, y + 56, x + 32, y + 62, 0.07, 0.09, 0.14);
+  let eye = 6;
+  if ((clock + 40) % 230 < 6) {
+    eye = 2;
+  }
+  quad(x + 15, y + 28, 34, 30, 0.07, 0.1, 0.18);
   quad(x + 17, y + 30, 30, 26, 0.2, 0.52, 0.92);
   quad(x + 17, y + 30, 30, 7, 0.45, 0.75, 1);
+  quad(x + 17, y + 46, 30, 3, 0.15, 0.38, 0.7);
+  quad(x + 28, y + 36, 8, 8, 0.95, 0.8, 0.3);
+  quad(x + 18, y + 8, 28, 26, 0.07, 0.1, 0.18);
   quad(x + 20, y + 10, 24, 22, 0.99, 0.82, 0.62);
   quad(x + 18, y + 7, 28, 8, 0.92, 0.3, 0.26);
-  quad(x + 24 + ex, y + 20 + ey, 5, 6, 0.1, 0.1, 0.16);
-  quad(x + 35 + ex, y + 20 + ey, 5, 6, 0.1, 0.1, 0.16);
+  quad(x + 18, y + 13, 28, 2, 0.7, 0.2, 0.2);
+  quad(x + 24 + ex, y + 20 + ey, 5, eye, 0.1, 0.1, 0.16);
+  quad(x + 35 + ex, y + 20 + ey, 5, eye, 0.1, 0.1, 0.16);
+  quad(x + 22, y + 26, 5, 3, 0.95, 0.6, 0.5);
+  quad(x + 37, y + 26, 5, 3, 0.95, 0.6, 0.5);
   quad(x + 12, y + 34, 6, 16, 0.99, 0.82, 0.62);
   quad(x + 46, y + 34, 6, 16, 0.99, 0.82, 0.62);
   quad(x + 20, y + 54, 9, 5, 0.12, 0.14, 0.24);
@@ -536,8 +792,25 @@ fn draw_player(x, y, dir) {
 // How far a thing that just moved in `move_dir` still has to slide, in pixels.
 // It starts a full tile behind and eases out, so it decelerates into the cell.
 fn slide_left() {
-  let rest = move_t / MOVE_TICKS;
-  return rest * rest * TILE;
+  return (1 - ease_out(1 - move_t / MOVE_TICKS)) * TILE;
+}
+
+// Soft drop shadows under every tile, so the board floats above the backdrop.
+fn board_shadows() {
+  let cy = 0;
+  while (cy < ROWS) {
+    let cx = 0;
+    while (cx < STRIDE) {
+      let age = cell_age(cx, cy);
+      if (tile_at(cy * STRIDE + cx) >= TILE_WALL && age >= 0) {
+        let x = view_x + cx * TILE;
+        let y = view_y + cy * TILE - cell_lift(age);
+        quad(x + 8, y + 12, TILE, TILE, 0.03, 0.04, 0.08);
+      }
+      cx = cx + 1;
+    }
+    cy = cy + 1;
+  }
 }
 
 fn board_tiles() {
@@ -549,10 +822,10 @@ fn board_tiles() {
       let kind = tile_at(index);
       let age = cell_age(cx, cy);
       if (kind >= TILE_WALL && age >= 0) {
-        let x = origin_x + cx * TILE;
-        let y = origin_y + cy * TILE - cell_lift(age);
+        let x = view_x + cx * TILE;
+        let y = view_y + cy * TILE - cell_lift(age);
         if (kind == TILE_WALL) {
-          draw_wall(x, y, cy);
+          draw_wall(x, y, cx, cy);
         } else {
           draw_floor(x, y, cx, cy);
           if (kind == TILE_TARGET) {
@@ -566,6 +839,22 @@ fn board_tiles() {
   }
 }
 
+fn board_puffs() {
+  let i = 0;
+  while (i < PUFF_COUNT) {
+    if (puff_life[i] > 0) {
+      let spent = 1 - puff_life[i] / PUFF_TICKS;
+      let drift = (i % 2 - 0.5) * 2;
+      let size = 3 + spent * 7 * (1 - spent * 0.4);
+      let x = puff_x[i] + drift * spent * 16;
+      let y = puff_y[i] - spent * 14;
+      let tone = 0.34 + 0.2 * (1 - spent);
+      diamond(x, y, size * (1 - spent * 0.7), tone, tone + 0.05, tone + 0.12);
+    }
+    i = i + 1;
+  }
+}
+
 // Crates are drawn after every tile so a crate sliding in from a neighbouring
 // cell is never covered by that cell's floor.
 fn board_crates() {
@@ -576,8 +865,8 @@ fn board_crates() {
       let cy = cell_row(i);
       let age = cell_age(cx, cy);
       if (age >= 0) {
-        let x = origin_x + cx * TILE;
-        let y = origin_y + cy * TILE - cell_lift(age);
+        let x = view_x + cx * TILE;
+        let y = view_y + cy * TILE - cell_lift(age);
         if (i == push_cell && move_t > 0) {
           x = x - dir_dx(move_dir) * slide_left();
           y = y - dir_dy(move_dir) * slide_left();
@@ -586,7 +875,7 @@ fn board_crates() {
         if (tile_at(i) == TILE_TARGET) {
           home = 1;
         }
-        draw_crate(x, y, home);
+        draw_crate(x, y, home, crate_stuck(i));
       }
     }
     i = i + 1;
@@ -597,10 +886,10 @@ fn board_crates() {
 fn board_pulse() {
   if (pulse_t > 0) {
     let spent = 1 - pulse_t / PULSE_TICKS;
-    let fade = 1 - spent;
-    let cx = origin_x + cell_col(pulse_cell) * TILE + 32;
-    let cy = origin_y + cell_row(pulse_cell) * TILE + 32;
-    diamond_ring(cx, cy, 18 + spent * 34, 4 + fade * 4, 0.17 + 0.78 * fade, 0.23 + 0.51 * fade, 0.3 - 0.05 * fade);
+    let fade = (1 - spent) * (1 - spent);
+    let cx = view_x + cell_col(pulse_cell) * TILE + 32;
+    let cy = view_y + cell_row(pulse_cell) * TILE + 32;
+    diamond_ring(cx, cy, 18 + ease_out(spent) * 40, 3 + fade * 5, 0.17 + 0.78 * fade, 0.23 + 0.51 * fade, 0.3 - 0.05 * fade);
   }
 }
 
@@ -609,44 +898,84 @@ fn board_player() {
   let cy = cell_row(player);
   let age = cell_age(cx, cy);
   if (age >= 0) {
-    let x = origin_x + cx * TILE;
-    let y = origin_y + cy * TILE - cell_lift(age);
+    let x = view_x + cx * TILE;
+    let y = view_y + cy * TILE - cell_lift(age);
+    let hop = 0;
     if (move_t > 0) {
       let behind = slide_left();
       x = x - dir_dx(move_dir) * behind;
       y = y - dir_dy(move_dir) * behind;
-      // A little hop, highest in the middle of the step.
+      // A little hop: a parabola, highest in the middle of the step.
       let progress = 1 - move_t / MOVE_TICKS;
-      y = y - (1 - abs(2 * progress - 1)) * 7;
+      hop = 4 * progress * (1 - progress) * 9;
+    } else {
+      // Standing still, the porter breathes.
+      hop = -wave(120, 0) * 1.5;
     }
     if (bump_t > 0) {
       // Shake against the obstacle, getting smaller as it dies out.
-      let shake = bump_t * 0.9;
+      let shake = bump_t * bump_t * 0.08;
       if (bump_t % 2 == 1) {
         shake = -shake;
       }
       x = x + dir_dx(bump_dir) * shake;
       y = y + dir_dy(bump_dir) * shake;
     }
-    draw_player(x, y, facing);
+    // The shadow stays on the ground and shrinks as the porter rises.
+    blob(x + 32, y + 59, 18 - hop * 0.8, 5 - hop * 0.25, 0.05, 0.07, 0.11);
+    draw_player(x, y - hop, facing);
   }
 }
 
 fn board() {
+  board_shadows();
   board_tiles();
+  board_puffs();
   board_crates();
   board_pulse();
   board_player();
 }
 
+fn segment(x, y, w, h, mask, bit, r, g, b) {
+  if (floor(mask / bit) % 2 == 1) {
+    quad(x, y, w, h, r, g, b);
+  }
+}
+
+fn digit(x, y, value, r, g, b) {
+  let mask = SEGMENTS[value];
+  segment(x + 2, y, 10, 3, mask, 1, r, g, b);
+  segment(x + 11, y + 2, 3, 10, mask, 2, r, g, b);
+  segment(x + 11, y + 13, 3, 10, mask, 4, r, g, b);
+  segment(x + 2, y + 22, 10, 3, mask, 8, r, g, b);
+  segment(x, y + 13, 3, 10, mask, 16, r, g, b);
+  segment(x, y + 2, 3, 10, mask, 32, r, g, b);
+  segment(x + 2, y + 11, 10, 3, mask, 64, r, g, b);
+}
+
+fn number(x, y, value, r, g, b) {
+  let div = 1;
+  while (div * 10 <= value) {
+    div = div * 10;
+  }
+  let px = x;
+  while (div >= 1) {
+    digit(px, y, floor(value / div) % 10, r, g, b);
+    px = px + 20;
+    div = floor(div / 10);
+  }
+}
+
 fn hud() {
+  quad(250, 12, 300, 36, 0.05, 0.06, 0.11);
+  quad(250, 12, 300, 3, 0.16, 0.18, 0.3);
   let i = 0;
   while (i < LEVEL_COUNT) {
     let px = 400 + (i - 2.5) * 38;
     if (i < current_level || (i == current_level && state != STATE_PLAY)) {
       diamond(px, 30, 13, 0.34, 0.84, 0.5);
     } else if (i == current_level) {
-      let size = 13 + wave(70) * 2;
+      let size = 13 + wave(70, 0) * 2;
       diamond(px, 30, size, 0.95, 0.74, 0.25);
       diamond(px, 30, 6, 0.45, 0.3, 0.1);
     } else {
@@ -659,10 +988,18 @@ fn hud() {
     let px = 400 + (i - (LEVEL_BOXES[current_level] - 1) / 2) * 34;
     if (i < covered) {
       quad(px - 11, 566, 22, 22, 0.34, 0.84, 0.5);
+      quad(px - 11, 566, 22, 4, 0.6, 0.98, 0.7);
     } else {
       quad(px - 11, 566, 22, 22, 0.22, 0.25, 0.36);
     }
     i = i + 1;
+  }
+  // Moves taken so far on the left, the best finish on the right.
+  tri(26, 20, 26, 42, 44, 31, 0.6, 0.72, 0.95);
+  number(54, 18, hist_len, 0.8, 0.88, 1);
+  if (best_moves[current_level] > 0) {
+    diamond(668, 31, 11, 0.95, 0.74, 0.25);
+    number(688, 18, best_moves[current_level], 0.95, 0.82, 0.45);
   }
 }
 
@@ -688,31 +1025,47 @@ fn sparkles(cx, cy, t) {
 
 // The panel drops in from above and settles at y 200..400 (plus `slide`).
 fn overlay_panel(r, g, b, slide) {
+  quad(158, 210 - slide, 500, 200, 0.03, 0.04, 0.08);
   quad(150, 200 - slide, 500, 200, r, g, b);
   quad(150, 200 - slide, 500, 14, r + 0.15, g + 0.15, b + 0.15);
   quad(150, 386 - slide, 500, 14, r * 0.6, g * 0.6, b * 0.6);
+  quad(150, 214 - slide, 6, 172, r + 0.06, g + 0.06, b + 0.06);
+  quad(644, 214 - slide, 6, 172, r * 0.75, g * 0.75, b * 0.75);
 }
 
 fn clear_scene() {
   let t = clear_t - CLEAR_PANEL_DELAY;
   if (t >= 0) {
-    let drop = max(0, 16 - t);
-    overlay_panel(0.1, 0.3, 0.2, drop * drop * 2);
+    let drop = (1 - ease_back(clamp01(t / CLEAR_PANEL_TICKS))) * 340;
+    overlay_panel(0.1, 0.3, 0.2, drop);
+    let i = 0;
+    while (i < 3) {
+      let pop = ease_back(clamp01((t - 10 - i * 8) / STAR_POP_TICKS));
+      let sx = 300 + i * 100;
+      if (i < stars) {
+        diamond(sx, 262, 30 * pop, 0.5, 0.36, 0.1);
+        diamond(sx, 262, 25 * pop, 0.97, 0.78, 0.26);
+        diamond(sx, 262, 12 * pop, 1, 0.94, 0.62);
+      } else {
+        diamond(sx, 262, 24, 0.08, 0.2, 0.15);
+      }
+      i = i + 1;
+    }
     sparkles(400, 300, t);
     if (clear_t >= CLEAR_READY) {
       // The "play" triangle breathes once Space will continue.
-      let grow = wave(50) * 8;
-      tri(365, 255 - grow, 365, 345 + grow, 445 + grow, 300, 0.95, 0.74, 0.25);
-      tri(365, 265 - grow, 365, 335 + grow, 430 + grow, 300, 1, 0.9, 0.5);
+      let grow = wave(50, 0) * 6;
+      tri(375, 328 - grow, 375, 372 + grow, 421 + grow, 350, 0.95, 0.74, 0.25);
+      tri(379, 334 - grow, 379, 366 + grow, 413 + grow, 350, 1, 0.9, 0.5);
     }
   }
 }
 
 fn win_scene() {
   overlay_panel(0.14, 0.2, 0.34, 0);
-  diamond(300, 300, 36 + wave(80) * 4, 0.95, 0.74, 0.25);
-  diamond(400, 300, 52 + wave(60) * 5, 0.34, 0.84, 0.5);
-  diamond(500, 300, 36 + wave(80) * 4, 0.95, 0.74, 0.25);
+  diamond(300, 300, 36 + wave(80, 0) * 4, 0.95, 0.74, 0.25);
+  diamond(400, 300, 52 + wave(60, 0) * 5, 0.34, 0.84, 0.5);
+  diamond(500, 300, 36 + wave(80, 20) * 4, 0.95, 0.74, 0.25);
   diamond(400, 300, 24, 0.8, 1, 0.9);
   sparkles(250, 300, clock % 90);
   sparkles(400, 260, (clock + 30) % 90);
