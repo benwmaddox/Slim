@@ -149,12 +149,12 @@ vignette, and every tile casts a shadow.
 
 The look deliberately mixes shapes. Rectangles (two triangles each) form the base
 of the board, diamonds mark targets and pips, and true triangles carry the rest:
-mitred bevels and diagonal facets on floors, walls, and crates, the porter's
+mitred bevels and diagonal facets on floors and walls, the porter's
 pointed cap, chamfered menu cards with triangular cursor brackets, five-pointed
 stars made of ten triangles, large slow shards drifting behind the board, and a
 pool of 56 spinning shards thrown out when a crate is pushed, lands on a target,
-or a level is cleared. In the test measurements a playing frame is roughly 57%
-rectangles, 10% diamonds and 33% lone triangles, and a cleared level about 42%
+or a level is cleared. In the test measurements a playing frame is roughly 59%
+rectangles, 9% diamonds and 31% lone triangles, and a cleared level about 40%
 triangles. Game state changes instantly; the
 animation timers only decide how far drawing lags behind, so input is never
 delayed.
