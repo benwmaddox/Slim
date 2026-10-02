@@ -1,8 +1,8 @@
-import {compileDetailed, parseProgram} from "./compiler.mjs";
+import {compileDetailed, parseProgram, INTRINSICS, MATH_IMPORTS} from "./compiler.mjs";
 
 const SVG_METADATA_BUILTIN = "svg_group";
 const SVG_TRI_BUILTIN = "svg_tri";
-const BUILTIN_NAMES = new Set(["tri", "sound", "input", SVG_METADATA_BUILTIN, SVG_TRI_BUILTIN]);
+const BUILTIN_NAMES = new Set(["tri", "sound", "input", "text", SVG_METADATA_BUILTIN, SVG_TRI_BUILTIN]);
 
 function safeName(name) {
   return name.replace(/[^A-Za-z0-9_$]/g, "_");
@@ -234,7 +234,11 @@ function emitJavaScript(program, detailed, precision, svgMetadata) {
             return `e.${SVG_TRI_BUILTIN}(${callSiteId}, ${args})`;
           }
           let call;
-          if (BUILTIN_NAMES.has(node.name)) {
+          if (Object.hasOwn(INTRINSICS, node.name)) {
+            call = `${INTRINSICS[node.name].js}(${args})`;
+          } else if (Object.hasOwn(MATH_IMPORTS, node.name)) {
+            call = `Math.${node.name}(${args})`;
+          } else if (BUILTIN_NAMES.has(node.name)) {
             call = `e.${node.name}(${args})`;
           } else {
             const target = functionNames.get(node.name);
