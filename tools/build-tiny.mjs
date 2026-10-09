@@ -19,18 +19,28 @@ const packageFiles = [
 ];
 
 function usage() {
-  console.log('Usage: node tools/build-tiny.mjs [source.slim] [--out-dir DIR] [--abi arm64-v8a[,x86_64]]');
-  console.log('Builds standalone Windows, Android, JavaScript, and WASM packages. Android defaults to arm64-v8a.');
+  console.log('Usage: node tools/build-tiny.mjs [source.slim] [--renderer software|gpu] [--out-dir DIR] [--abi arm64-v8a[,x86_64]]');
+  console.log('Builds standalone Windows, Android, JavaScript, and WASM packages. Renderer defaults to software; Android defaults to arm64-v8a.');
 }
 
-function parseArgs(argv) {
-  const options = {source: 'examples/boxpush.slim', outDir: undefined, abis: ['arm64-v8a', 'x86_64']};
+export function normalizeTinyRenderer(renderer = 'software') {
+  if (!['software', 'gpu'].includes(renderer)) throw new Error('--renderer must be software or gpu');
+  return renderer;
+}
+
+export function parseTinyArgs(argv, projectRoot = root) {
+  const options = {source: 'examples/boxpush.slim', renderer: 'software', outDir: undefined, abis: ['arm64-v8a', 'x86_64']};
   let sourceSeen = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') {
       usage();
       process.exit(0);
+    }
+    if (arg === '--renderer' || arg.startsWith('--renderer=')) {
+      options.renderer = optionValue(argv, i, arg, '--renderer');
+      if (!arg.includes('=')) i += 1;
+      continue;
     }
     if (arg === '--out-dir' || arg.startsWith('--out-dir=')) {
       options.outDir = optionValue(argv, i, arg, '--out-dir');
@@ -47,14 +57,18 @@ function parseArgs(argv) {
     options.source = arg;
     sourceSeen = true;
   }
+  options.renderer = normalizeTinyRenderer(options.renderer);
   if (!options.abis.length || options.abis.some((abi) => !['arm64-v8a', 'x86_64'].includes(abi))) {
     throw new Error('--abi must be arm64-v8a, x86_64, or a comma-separated combination');
   }
   if (new Set(options.abis).size !== options.abis.length) throw new Error('--abi contains a duplicate ABI');
-  options.source = resolve(root, options.source);
+  options.source = resolve(projectRoot, options.source);
   options.stem = safeStem(options.source);
-  options.outDir = resolve(root, options.outDir || join('dist', 'tiny', options.stem));
-  options.stageDir = resolve(root, 'output', 'tiny-package', options.stem);
+  const defaultOutDir = options.renderer === 'gpu'
+    ? join('dist', 'tiny', options.stem, 'gpu')
+    : join('dist', 'tiny', options.stem);
+  options.outDir = resolve(projectRoot, options.outDir || defaultOutDir);
+  options.stageDir = resolve(projectRoot, 'output', 'tiny-package', options.stem, ...(options.renderer === 'gpu' ? ['gpu'] : []));
   return options;
 }
 
@@ -207,7 +221,7 @@ async function buildNative(options) {
   const nativeDir = join(options.stageDir, 'native');
   const args = [
     join(root, 'tools', 'build-native.mjs'), options.source,
-    '--target', 'all', '--abi', options.abis.join(','), '--out-dir', nativeDir,
+    '--target', 'all', '--renderer', options.renderer, '--abi', options.abis.join(','), '--out-dir', nativeDir,
   ];
   run(process.execPath, args, 'Windows and Android native builds');
   return {nativeDir, report: JSON.parse(await readFile(join(nativeDir, 'native-report.json'), 'utf8'))};
@@ -220,9 +234,23 @@ async function writeWindowsArchive(python, exePath, destination) {
 function readme(title, files, nativeReport, browser) {
   const rows = files.map(({name, record}) => `| ${name} | ${record.bytes.toLocaleString('en-US')} |`).join('\n');
   const abiLines = nativeReport.targets.android.abis.map((build) =>
-    `- **Android ${build.abi}:** ${build.apk.signed ? 'signed APK' : 'unsigned APK'}; APK ${build.apk.bytes.toLocaleString('en-US')} B, extracted native library ${build.nativeLibrary.bytes.toLocaleString('en-US')} B; APK plus extracted library estimate ${build.installedPayloadBytes.toLocaleString('en-US')} B.`).join('\n');
+    `- **Android ${build.abi}:** ${build.apk.signed ? 'signed APK' : 'unsigned APK'}; package \`${build.packageName}\`, launcher label “${build.appLabel}”; APK ${build.apk.bytes.toLocaleString('en-US')} B, extracted native library ${build.nativeLibrary.bytes.toLocaleString('en-US')} B; APK plus extracted library estimate ${build.installedPayloadBytes.toLocaleString('en-US')} B.`).join('\n');
+  const windowsDependencyList = [...new Set([
+    ...nativeReport.targets.windows.systemDllImports,
+    ...(nativeReport.targets.windows.rendererSystemDependencies || []),
+  ])].sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
+  const windowsDependencies = windowsDependencyList.length
+    ? windowsDependencyList.join(', ')
+    : 'none reported';
+  const androidDependencies = [...new Set(nativeReport.targets.android.abis.flatMap((build) => build.nativeLibrary.dynamicDependencies))].sort();
+  const shaderCompilation = nativeReport.targets.windows.shaderCompilation;
+  const shaderLines = shaderCompilation
+    ? `- Embedded vertex shader: ${shaderCompilation.shaders.vertex.profile}, ${shaderCompilation.shaders.vertex.blob.bytes.toLocaleString('en-US')} B, SHA-256 \`${shaderCompilation.shaders.vertex.blob.sha256}\`.\n` +
+      `- Embedded pixel shader: ${shaderCompilation.shaders.pixel.profile}, ${shaderCompilation.shaders.pixel.blob.bytes.toLocaleString('en-US')} B, SHA-256 \`${shaderCompilation.shaders.pixel.blob.sha256}\`.\n` +
+      `- Shader source SHA-256: \`${shaderCompilation.source.sha256}\`; FXC SDK ${shaderCompilation.compilerSdk}.`
+    : '';
   return `# ${title} tiny build\n\n` +
-    `A size experiment built from the same Slim source. Game code and data are embedded in each file; the browser pages run offline from a local file, and the native installers do not download assets. The normal Slim JavaScript workflow is unchanged.\n\n` +
+    `A size experiment built from the same Slim source using the **${nativeReport.renderer}** native renderer. The software renderer remains the size-oriented default; the GPU path is a feasibility comparison, not a claim of smaller files or faster runtime. Game code and data are embedded in each file; the browser pages run offline from a local file, and the native installers do not download assets. The normal Slim JavaScript workflow is unchanged.\n\n` +
     `## Controls\n\n` +
     `- **Windows:** Arrow keys or WASD move and push crates; Space undoes; R restarts; Esc or M opens the menu.\n` +
     `- **Android:** use the on-screen direction pad; the large A button plays, undoes, or advances; R restarts; M opens the menu.\n` +
@@ -230,6 +258,9 @@ function readme(title, files, nativeReport, browser) {
     `## Files and sizes\n\n| File | Bytes |\n|---|---:|\n${rows}\n\n` +
     `Windows package is a 64-bit standalone executable that uses system DLLs. Android NativeActivity targets API ${nativeReport.targets.android.abis[0]?.targetSdk ?? 36}, minimum API ${nativeReport.targets.android.abis[0]?.minSdk ?? 26}, and contains no Java bytecode or external assets. ${browser.wasmPage.wasmBytes.toLocaleString('en-US')} bytes is the selected raw WASM module; the HTML file embeds it.\n\n` +
     `${abiLines}\n\n` +
+    `## Native renderer details\n\n` +
+    `Renderer: **${nativeReport.renderer}**. Windows system dependencies: ${windowsDependencies}. Android system dependencies: ${androidDependencies.length ? androidDependencies.join(', ') : 'none reported'}.\n\n` +
+    `${shaderLines ? `${shaderLines}\n\n` : ''}` +
     `The Android “APK plus extracted library” figure is an installed-payload estimate. It excludes Android-generated metadata and filesystem allocation. APKs are signed with the local debug identity when available; these are local experiment builds, not production release packages.\n\n` +
     `These sizes compare the selected local compiler candidates and hosts. They are measurements, not a proof of the absolute minimum possible size. See compact-size-report.json for hashes, selected optimization candidates, dependencies, and detailed byte counts.\n`;
 }
@@ -248,21 +279,27 @@ function nativeCandidateMeasurements(candidates) {
 function summarizeNativeReport(nativeReport, windowsZip, androidBuilds) {
   const windows = nativeReport.targets.windows;
   return {
+    renderer: nativeReport.renderer,
     allAssetsEmbedded: nativeReport.allAssetsEmbedded,
     imports: nativeReport.imports,
     hostImports: nativeReport.hostImports,
     hostMacros: nativeReport.hostMacros,
     windows: {
+      renderer: windows.renderer,
       selectedProfile: windows.selectedProfile,
       optimization: windows.optimization,
       executable: {bytes: windows.executable.bytes, sha256: windows.executable.sha256},
       portableZip: windowsZip,
       systemDllImports: windows.systemDllImports,
+      rendererSystemDependencies: windows.rendererSystemDependencies || [],
+      ...(windows.shaderCompilation ? {shaderCompilation: windows.shaderCompilation} : {}),
       candidates: nativeCandidateMeasurements(windows.candidates),
     },
     android: androidBuilds.map((build) => ({
+      renderer: build.renderer,
       abi: build.abi,
       packageName: build.packageName,
+      appLabel: build.appLabel,
       minSdk: build.minSdk,
       targetSdk: build.targetSdk,
       selectedProfile: build.selectedProfile,
@@ -317,7 +354,7 @@ async function publishPackage(options, packageStage) {
 }
 
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const options = parseTinyArgs(process.argv.slice(2));
   if (!existsSync(options.source)) throw new Error(`Source file does not exist: ${options.source}`);
   await mkdir(options.stageDir, {recursive: true});
   const packageStage = join(options.stageDir, 'package');
@@ -346,6 +383,7 @@ async function main() {
   const report = {
     version: 1,
     source: relative(root, options.source).replaceAll('\\', '/'),
+    renderer: options.renderer,
     title: browser.title,
     allAssetsEmbedded: true,
     generatedBy: 'tools/build-tiny.mjs',
@@ -364,16 +402,27 @@ async function main() {
   };
   await writeFile(join(packageStage, 'compact-size-report.json'), `${JSON.stringify(report, null, 2)}\n`);
   await publishPackage(options, packageStage);
-  console.log(`Tiny package ready: ${options.outDir}`);
+  console.log(`Tiny ${options.renderer} package ready: ${options.outDir}`);
   for (const [name, item] of Object.entries(packageRecords)) console.log(`  ${name}: ${item.bytes.toLocaleString('en-US')} B`);
   console.log(`  compact-size-report.json: ${(await stat(join(options.outDir, 'compact-size-report.json'))).size.toLocaleString('en-US')} B`);
   console.log(`Native inspection report: ${join(nativeDir, 'native-report.json')}`);
   console.log(`Browser optimization report: ${join(options.stageDir, 'browser', `${options.stem}.size.json`)}`);
 }
 
-try {
-  await main();
-} catch (error) {
-  console.error(`Tiny package build failed: ${error.message}`);
-  process.exitCode = 1;
+export function isTinyBuildMain(argvPath, modulePath, platform = process.platform) {
+  if (!argvPath) return false;
+  const argvResolved = resolve(argvPath);
+  const moduleResolved = resolve(modulePath);
+  return platform === 'win32'
+    ? argvResolved.toLowerCase() === moduleResolved.toLowerCase()
+    : argvResolved === moduleResolved;
+}
+
+if (isTinyBuildMain(process.argv[1], fileURLToPath(import.meta.url))) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(`Tiny package build failed: ${error.message}`);
+    process.exitCode = 1;
+  }
 }

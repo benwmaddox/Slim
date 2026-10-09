@@ -2,7 +2,20 @@
 #define SLIM_NATIVE_COMMON_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include <math.h>
+
+#ifndef SLIM_DISABLE_SIMD_FILL
+#define SLIM_DISABLE_SIMD_FILL 0
+#endif
+
+#if !SLIM_DISABLE_SIMD_FILL && (defined(__x86_64__) || defined(_M_X64))
+#include <emmintrin.h>
+#define SLIM_FILL_SSE2 1
+#elif !SLIM_DISABLE_SIMD_FILL && defined(__aarch64__)
+#include <arm_neon.h>
+#define SLIM_FILL_NEON 1
+#endif
 
 extern const char *const slim_texts[];
 extern const uint32_t slim_text_count;
@@ -41,6 +54,15 @@ void slim_trap(void);
 #ifndef SLIM_SYSTEM_TEXT
 #define SLIM_SYSTEM_TEXT 0
 #endif
+#ifndef SLIM_PIXEL_RGBA_8888
+#define SLIM_PIXEL_RGBA_8888 0
+#endif
+#ifndef SLIM_OPAQUE_FRAME
+#define SLIM_OPAQUE_FRAME 0
+#endif
+#ifndef SLIM_GPU_RENDERER
+#define SLIM_GPU_RENDERER 0
+#endif
 
 typedef uint32_t slim_u32;
 
@@ -62,6 +84,46 @@ static void slim_bind_framebuffer(slim_u32 *pixels, int width, int height, int s
 static int slim_framebuffer_size_valid(int width, int height) {
   return width > 0 && height > 0 && width <= 16384 && height <= 16384 &&
          (uint64_t)(unsigned int)width * (uint64_t)(unsigned int)height <= 16777216ull;
+}
+
+/* Drawing APIs use canonical 0x00RRGGBB values. Android's locked
+   WINDOW_FORMAT_RGBA_8888 pixels are byte-ordered RGBA on little-endian
+   systems, so encode once when each primitive enters the rasterizer. */
+static slim_u32 slim_encode_pixel(slim_u32 rgb) {
+#if SLIM_PIXEL_RGBA_8888
+  return 0xff000000u | ((rgb & 0x000000ffu) << 16) | (rgb & 0x0000ff00u) |
+         ((rgb >> 16) & 0x000000ffu);
+#else
+  return rgb;
+#endif
+}
+
+static slim_u32 slim_decode_pixel(slim_u32 pixel) {
+#if SLIM_PIXEL_RGBA_8888
+  return ((pixel & 0x000000ffu) << 16) | (pixel & 0x0000ff00u) |
+         ((pixel >> 16) & 0x000000ffu);
+#else
+  return pixel;
+#endif
+}
+
+/* Fill packed pixels without imposing alignment requirements on row starts. */
+static void slim_fill_pixels(slim_u32 *pixels, int count, slim_u32 value) {
+  if (!pixels || count <= 0) return;
+#if defined(SLIM_FILL_SSE2)
+  {
+    const __m128i packed = _mm_set1_epi32((int)value);
+    for (; count >= 4; count -= 4, pixels += 4) {
+      _mm_storeu_si128((__m128i *)(void *)pixels, packed);
+    }
+  }
+#elif defined(SLIM_FILL_NEON)
+  {
+    const uint32x4_t packed = vdupq_n_u32(value);
+    for (; count >= 4; count -= 4, pixels += 4) vst1q_u32(pixels, packed);
+  }
+#endif
+  for (; count > 0; --count) *pixels++ = value;
 }
 
 static void slim_fit_viewport(int width, int height, int *left, int *top,
@@ -92,6 +154,8 @@ static int slim_is_finite(float value) {
   return (slim_float_bits(value) & 0x7f800000u) != 0x7f800000u;
 }
 
+#include "gpu-common.h"
+
 static float slim_bits_float(slim_u32 value) {
   union { float f; slim_u32 u; } bits;
   bits.u = value;
@@ -99,13 +163,34 @@ static float slim_bits_float(slim_u32 value) {
 }
 
 static void slim_clear(void) {
+#if SLIM_GPU_RENDERER
+  /* The GPU target is cleared by slim_gpu_begin_target for every simulation tick. */
+  return;
+#else
   int y;
+  slim_u32 black = slim_encode_pixel(0);
   if (!slim_framebuffer || slim_fb_width <= 0 || slim_fb_height <= 0 || slim_fb_stride < slim_fb_width) return;
   for (y = 0; y < slim_fb_height; ++y) {
-    int x;
     slim_u32 *row = slim_framebuffer + y * slim_fb_stride;
-    for (x = 0; x < slim_fb_width; ++x) row[x] = 0;
+    slim_fill_pixels(row, slim_fb_width, black);
   }
+#endif
+}
+
+static void slim_begin_frame(void) {
+#if SLIM_GPU_RENDERER
+  slim_gpu_begin_frame();
+#elif !SLIM_OPAQUE_FRAME
+  slim_clear();
+#endif
+}
+
+static int slim_finish_frame(void) {
+#if SLIM_GPU_RENDERER
+  return slim_gpu_finish_frame();
+#else
+  return 1;
+#endif
 }
 
 static float slim_clamp01(float value) {
@@ -122,16 +207,55 @@ static slim_u32 slim_rgb(float r, float g, float b) {
 }
 
 static void slim_rect_pixels(int x0, int y0, int x1, int y1, slim_u32 color) {
-  int x, y;
+  int y;
   if (x0 < 0) x0 = 0;
   if (y0 < 0) y0 = 0;
   if (x1 > slim_fb_width) x1 = slim_fb_width;
   if (y1 > slim_fb_height) y1 = slim_fb_height;
   if (x0 >= x1 || y0 >= y1) return;
+#if SLIM_GPU_RENDERER
+  if (!slim_gpu_target_ready || slim_gpu_frame_failed) return;
+  slim_gpu_append_rect(x0, y0, x1, y1, slim_decode_pixel(color), 255u);
+#else
   for (y = y0; y < y1; ++y) {
     slim_u32 *row = slim_framebuffer + y * slim_fb_stride;
-    for (x = x0; x < x1; ++x) row[x] = color;
+    slim_fill_pixels(row + x0, x1 - x0, color);
   }
+#endif
+  (void)y;
+}
+
+static void slim_rect_pixels_alpha(int x0, int y0, int x1, int y1,
+                                   slim_u32 color, float alpha) {
+  int y;
+  alpha = slim_clamp01(alpha);
+  if (alpha <= 0.0f) return;
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > slim_fb_width) x1 = slim_fb_width;
+  if (y1 > slim_fb_height) y1 = slim_fb_height;
+  if (x0 >= x1 || y0 >= y1) return;
+#if SLIM_GPU_RENDERER
+  if (!slim_gpu_target_ready || slim_gpu_frame_failed) return;
+  slim_gpu_append_rect(x0, y0, x1, y1, color, slim_gpu_alpha_byte(alpha));
+#else
+  if (!slim_framebuffer || slim_fb_stride < slim_fb_width) return;
+  for (y = y0; y < y1; ++y) {
+    slim_u32 *row = slim_framebuffer + y * slim_fb_stride;
+    int x;
+    for (x = x0; x < x1; ++x) {
+      slim_u32 old = slim_decode_pixel(row[x]);
+      slim_u32 red = (slim_u32)((float)((old >> 16) & 255u) * (1.0f - alpha) +
+                                (float)((color >> 16) & 255u) * alpha);
+      slim_u32 green = (slim_u32)((float)((old >> 8) & 255u) * (1.0f - alpha) +
+                                  (float)((color >> 8) & 255u) * alpha);
+      slim_u32 blue = (slim_u32)((float)(old & 255u) * (1.0f - alpha) +
+                                 (float)(color & 255u) * alpha);
+      row[x] = slim_encode_pixel((red << 16) | (green << 8) | blue);
+    }
+  }
+#endif
+  (void)y;
 }
 
 static void slim_rect(float x, float y, float width, float height, slim_u32 color) {
@@ -139,7 +263,11 @@ static void slim_rect(float x, float y, float width, float height, slim_u32 colo
   float sy = (float)slim_fb_height / 600.0f;
   float left, right, top, bottom;
   int x0, y0, x1, y1;
+#if SLIM_GPU_RENDERER
+  if (slim_fb_width <= 0 || slim_fb_height <= 0 || !slim_gpu_target_ready || slim_gpu_frame_failed ||
+#else
   if (!slim_framebuffer || !slim_fb_width || !slim_fb_height ||
+#endif
       !slim_is_finite(x) || !slim_is_finite(y) || !slim_is_finite(width) || !slim_is_finite(height)) return;
   left = x * sx;
   right = (x + width) * sx;
@@ -155,7 +283,7 @@ static void slim_rect(float x, float y, float width, float height, slim_u32 colo
   y0 = (int)top;
   x1 = (int)(right + 0.999f);
   y1 = (int)(bottom + 0.999f);
-  slim_rect_pixels(x0, y0, x1, y1, color);
+  slim_rect_pixels(x0, y0, x1, y1, slim_encode_pixel(color));
 }
 
 static float slim_min3(float a, float b, float c) {
@@ -199,7 +327,7 @@ static void slim_raster_triangle(float x0, float y0, float x1, float y1,
   for (y = iy0; y < iy1; ++y) {
     float scan_y = (float)y + 0.5f;
     float span_min = 0.0f, span_max = 0.0f;
-    int intersections = 0, ix0, ix1, x;
+    int intersections = 0, ix0, ix1;
     float edge_x;
     if (ay == by) {
       if (scan_y == ay) {
@@ -246,13 +374,39 @@ static void slim_raster_triangle(float x0, float y0, float x1, float y1,
     if (ix1 > slim_fb_width) ix1 = slim_fb_width;
     if (ix0 >= ix1) continue;
     slim_u32 *row = slim_framebuffer + y * slim_fb_stride;
-    for (x = ix0; x < ix1; ++x) row[x] = color;
+    slim_fill_pixels(row + ix0, ix1 - ix0, color);
   }
 }
 
 float slim_tri(float x0, float y0, float x1, float y1, float x2, float y2,
                float r, float g, float b) {
-  slim_raster_triangle(x0, y0, x1, y1, x2, y2, slim_rgb(r, g, b));
+#if SLIM_GPU_RENDERER
+  float sx = (float)slim_fb_width / 800.0f;
+  float sy = (float)slim_fb_height / 600.0f;
+  float ax, ay, bx, by, cx, cy, area, min_x, max_x, min_y, max_y;
+  slim_u32 rgb;
+  if (slim_gpu_frame_failed || !slim_gpu_target_ready || slim_fb_width <= 0 || slim_fb_height <= 0 ||
+      !slim_is_finite(x0) || !slim_is_finite(y0) || !slim_is_finite(x1) ||
+      !slim_is_finite(y1) || !slim_is_finite(x2) || !slim_is_finite(y2)) return 0.0f;
+  ax = x0 * sx; ay = y0 * sy;
+  bx = x1 * sx; by = y1 * sy;
+  cx = x2 * sx; cy = y2 * sy;
+  area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  if (!slim_is_finite(ax) || !slim_is_finite(ay) || !slim_is_finite(bx) ||
+      !slim_is_finite(by) || !slim_is_finite(cx) || !slim_is_finite(cy) ||
+      !slim_is_finite(area) || area == 0.0f) return 0.0f;
+  min_x = slim_min3(ax, bx, cx); max_x = slim_max3(ax, bx, cx);
+  min_y = slim_min3(ay, by, cy); max_y = slim_max3(ay, by, cy);
+  if (!slim_is_finite(min_x) || !slim_is_finite(max_x) ||
+      !slim_is_finite(min_y) || !slim_is_finite(max_y) ||
+      max_x <= 0.0f || max_y <= 0.0f ||
+      min_x >= (float)slim_fb_width || min_y >= (float)slim_fb_height) return 0.0f;
+  rgb = slim_rgb(r, g, b);
+  slim_gpu_append_triangle(ax, ay, bx, by, cx, cy, rgb, 255u);
+#else
+  slim_raster_triangle(x0, y0, x1, y1, x2, y2,
+                       slim_encode_pixel(slim_rgb(r, g, b)));
+#endif
   return 0.0f;
 }
 

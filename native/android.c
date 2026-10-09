@@ -8,10 +8,15 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <time.h>
+#define SLIM_PIXEL_RGBA_8888 1
 #include "common.h"
+#if SLIM_GPU_RENDERER
+#include "android-gpu.h"
+#endif
 
 static ANativeActivity *slim_activity;
 static ANativeWindow *slim_window;
+static uint32_t slim_window_generation;
 static AInputQueue *slim_input_queue;
 static AInputQueue *slim_attached_queue;
 static AInputQueue *slim_queue_in_flight;
@@ -38,27 +43,6 @@ static float slim_input_values[11];
 #if SLIM_HAS_SOUND
 static AAudioStream *slim_audio_stream;
 #endif
-
-static int slim_android_resize_framebuffer(int width, int height) {
-  slim_u32 *pixels;
-  size_t bytes;
-  if (!slim_framebuffer_size_valid(width, height)) return 0;
-  if (width == slim_fb_width && height == slim_fb_height && slim_framebuffer) return 1;
-  bytes = (size_t)width * (size_t)height * sizeof(slim_u32);
-  pixels = (slim_u32 *)realloc(slim_framebuffer, bytes);
-  if (!pixels) return 0;
-  slim_bind_framebuffer(pixels, width, height, width);
-  return 1;
-}
-
-static int slim_android_prepare_framebuffer(ANativeWindow *window) {
-  int width, height, left, top, view_width, view_height;
-  if (!window) return 0;
-  width = ANativeWindow_getWidth(window);
-  height = ANativeWindow_getHeight(window);
-  slim_fit_viewport(width, height, &left, &top, &view_width, &view_height);
-  return slim_android_resize_framebuffer(view_width, view_height);
-}
 
 float slim_input(float index) {
   int i;
@@ -250,22 +234,29 @@ static void slim_android_blend_rect(float x, float y, float width, float height,
   int y0 = (int)(y * ((float)slim_fb_height / 600.0f));
   int x1 = (int)((x + width) * ((float)slim_fb_width / 800.0f) + 0.999f);
   int y1 = (int)((y + height) * ((float)slim_fb_height / 600.0f) + 0.999f);
+#if !SLIM_GPU_RENDERER
   int ix, iy;
-  if (!slim_framebuffer || slim_fb_width <= 0 || slim_fb_height <= 0) return;
+#endif
+  if (slim_fb_width <= 0 || slim_fb_height <= 0) return;
   if (x0 < 0) x0 = 0;
   if (y0 < 0) y0 = 0;
   if (x1 > slim_fb_width) x1 = slim_fb_width;
   if (y1 > slim_fb_height) y1 = slim_fb_height;
+#if SLIM_GPU_RENDERER
+  slim_rect_pixels_alpha(x0, y0, x1, y1, color, alpha);
+#else
+  if (!slim_framebuffer) return;
   for (iy = y0; iy < y1; ++iy) {
     slim_u32 *row = slim_framebuffer + iy * slim_fb_stride;
     for (ix = x0; ix < x1; ++ix) {
-      slim_u32 old = row[ix];
+      slim_u32 old = slim_decode_pixel(row[ix]);
       int r = (int)((float)((old >> 16) & 255u) * (1.0f - alpha) + (float)((color >> 16) & 255u) * alpha);
       int g = (int)((float)((old >> 8) & 255u) * (1.0f - alpha) + (float)((color >> 8) & 255u) * alpha);
       int b = (int)((float)(old & 255u) * (1.0f - alpha) + (float)(color & 255u) * alpha);
-      row[ix] = ((slim_u32)r << 16) | ((slim_u32)g << 8) | (slim_u32)b;
+      row[ix] = slim_encode_pixel(((slim_u32)r << 16) | ((slim_u32)g << 8) | (slim_u32)b);
     }
   }
+#endif
 }
 
 static void slim_android_draw_letter(float x, float y, char letter) {
@@ -303,38 +294,62 @@ static void slim_android_draw_controls(void) {
   slim_tri(704, 528, 736, 528, 738, 536, 0.12f, 0.10f, 0.08f);
 }
 
-static void slim_android_present(ANativeWindow *window) {
-  ANativeWindow_Buffer buffer;
-  int width, height, dest_width, dest_height, left, top, x, y;
-  if (!window || ANativeWindow_lock(window, &buffer, 0) != 0) return;
-  width = buffer.width;
-  height = buffer.height;
-  slim_fit_viewport(width, height, &left, &top, &dest_width, &dest_height);
-  if (!slim_framebuffer || slim_fb_width != dest_width || slim_fb_height != dest_height ||
-      !slim_framebuffer_size_valid(dest_width, dest_height)) {
-    for (y = 0; y < height; ++y) {
-      uint32_t *dest = (uint32_t *)buffer.bits + y * buffer.stride;
-      for (x = 0; x < width; ++x) dest[x] = 0xff000000u;
-    }
+#if !SLIM_GPU_RENDERER
+static void slim_android_clear_bars(ANativeWindow_Buffer *buffer,
+                                    int left, int top, int view_width, int view_height) {
+  int y;
+  slim_u32 black = slim_encode_pixel(0);
+  slim_u32 *pixels = (slim_u32 *)buffer->bits;
+  int right = left + view_width;
+  int bottom = top + view_height;
+  for (y = 0; y < top; ++y) {
+    slim_u32 *row = pixels + (size_t)y * (size_t)buffer->stride;
+    slim_fill_pixels(row, buffer->width, black);
+  }
+  for (y = bottom; y < buffer->height; ++y) {
+    slim_u32 *row = pixels + (size_t)y * (size_t)buffer->stride;
+    slim_fill_pixels(row, buffer->width, black);
+  }
+  for (y = top; y < bottom; ++y) {
+    slim_u32 *row = pixels + (size_t)y * (size_t)buffer->stride;
+    slim_fill_pixels(row, left, black);
+    slim_fill_pixels(row + right, buffer->width - right, black);
+  }
+}
+
+static int slim_android_lock_framebuffer(ANativeWindow *window,
+                                         ANativeWindow_Buffer *buffer) {
+  int left, top, view_width, view_height;
+  if (!window || ANativeWindow_lock(window, buffer, 0) != 0) {
+    slim_bind_framebuffer(0, 0, 0, 0);
+    return 0;
+  }
+  if (!buffer->bits || buffer->format != WINDOW_FORMAT_RGBA_8888 ||
+      buffer->width <= 0 || buffer->height <= 0 || buffer->stride < buffer->width ||
+      !slim_framebuffer_size_valid(buffer->width, buffer->height) ||
+      (uint64_t)(unsigned int)buffer->stride * (uint64_t)(unsigned int)buffer->height > 16777216ull) {
+    slim_bind_framebuffer(0, 0, 0, 0);
     ANativeWindow_unlockAndPost(window);
-    return;
+    return 0;
   }
-  for (y = 0; y < height; ++y) {
-    uint32_t *dest = (uint32_t *)buffer.bits + y * buffer.stride;
-    for (x = 0; x < width; ++x) {
-      if (x >= left && x < left + dest_width && y >= top && y < top + dest_height) {
-        slim_u32 source = slim_framebuffer[(y - top) * slim_fb_stride + (x - left)];
-        slim_u32 red = (source >> 16) & 255u;
-        slim_u32 green = (source >> 8) & 255u;
-        slim_u32 blue = source & 255u;
-        dest[x] = 0xff000000u | (blue << 16) | (green << 8) | red;
-      } else {
-        dest[x] = 0xff000000u;
-      }
-    }
+  slim_fit_viewport(buffer->width, buffer->height, &left, &top, &view_width, &view_height);
+  if (!slim_framebuffer_size_valid(view_width, view_height)) {
+    slim_bind_framebuffer(0, 0, 0, 0);
+    ANativeWindow_unlockAndPost(window);
+    return 0;
   }
+  slim_android_clear_bars(buffer, left, top, view_width, view_height);
+  slim_bind_framebuffer((slim_u32 *)buffer->bits +
+                        (size_t)top * (size_t)buffer->stride + (size_t)left,
+                        view_width, view_height, buffer->stride);
+  return 1;
+}
+
+static void slim_android_unlock_framebuffer(ANativeWindow *window) {
+  slim_bind_framebuffer(0, 0, 0, 0);
   ANativeWindow_unlockAndPost(window);
 }
+#endif
 
 static void slim_snapshot_inputs_locked(void) {
   int i;
@@ -374,6 +389,12 @@ static void *slim_game_loop(void *unused) {
   int64_t next_frame = slim_now_ns();
   ALooper *looper;
   AInputQueue *attached_queue = 0;
+#if SLIM_OPAQUE_FRAME && !SLIM_GPU_RENDERER
+  uint32_t last_drawn_generation = 0;
+  int has_drawn_frame = 0;
+  int last_buffer_width = 0, last_buffer_height = 0;
+  int last_view_width = 0, last_view_height = 0;
+#endif
   (void)unused;
   looper = ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
   pthread_mutex_lock(&slim_state_mutex);
@@ -382,14 +403,19 @@ static void *slim_game_loop(void *unused) {
   slim_init();
   for (;;) {
     ANativeWindow *window;
+#if !SLIM_GPU_RENDERER
+    ANativeWindow_Buffer buffer;
+#endif
     AInputQueue *requested_queue;
     int running;
+    uint32_t window_generation;
     int64_t now = slim_now_ns();
     pthread_mutex_lock(&slim_state_mutex);
     running = !slim_destroying;
     requested_queue = slim_input_queue;
     if (requested_queue != attached_queue) slim_queue_in_flight = requested_queue;
     window = slim_window;
+    window_generation = slim_window_generation;
     if (running && slim_resumed && slim_focused && window) {
       ANativeWindow_acquire(window);
     } else window = 0;
@@ -412,13 +438,11 @@ static void *slim_game_loop(void *unused) {
        pacing deadline and the render loop has no idle wait to poll in. */
     slim_poll_input(looper, attached_queue, 0);
     if (!window) {
+#if SLIM_GPU_RENDERER
+      slim_android_gpu_detach_window();
+#endif
       next_frame = now + 16666667ll;
       slim_poll_input(looper, attached_queue, 10);
-      continue;
-    }
-    if (!slim_android_prepare_framebuffer(window)) {
-      ANativeWindow_release(window);
-      slim_poll_input(looper, attached_queue, 8);
       continue;
     }
     if (now < next_frame) {
@@ -431,21 +455,61 @@ static void *slim_game_loop(void *unused) {
     }
     next_frame += 16666667ll;
     if (now - next_frame > 100000000ll) next_frame = now + 16666667ll;
+#if SLIM_GPU_RENDERER
+    if (!slim_android_gpu_prepare(window, window_generation)) {
+      ANativeWindow_release(window);
+      slim_poll_input(looper, attached_queue, 8);
+      continue;
+    }
+#else
+    if (!slim_android_lock_framebuffer(window, &buffer)) {
+      ANativeWindow_release(window);
+      slim_poll_input(looper, attached_queue, 8);
+      continue;
+    }
+#endif
     pthread_mutex_lock(&slim_state_mutex);
     slim_snapshot_inputs_locked();
     pthread_mutex_unlock(&slim_state_mutex);
-    slim_clear();
+#if SLIM_OPAQUE_FRAME && !SLIM_GPU_RENDERER
+    if (!has_drawn_frame || window_generation != last_drawn_generation ||
+        buffer.width != last_buffer_width || buffer.height != last_buffer_height ||
+        slim_fb_width != last_view_width || slim_fb_height != last_view_height) {
+      slim_clear();
+    }
+#endif
+    slim_begin_frame();
     slim_frame();
     slim_android_draw_controls();
-    slim_android_present(window);
+#if SLIM_GPU_RENDERER
+    {
+      int frame_ok = slim_finish_frame();
+      /* Swap may wait for the display; acknowledge events queued during the
+         frame before entering the blocking EGL call. */
+      slim_poll_input(looper, attached_queue, 0);
+      if (frame_ok) (void)slim_android_gpu_present();
+    }
+#else
+#if SLIM_OPAQUE_FRAME
+    last_drawn_generation = window_generation;
+    last_buffer_width = buffer.width;
+    last_buffer_height = buffer.height;
+    last_view_width = slim_fb_width;
+    last_view_height = slim_fb_height;
+    has_drawn_frame = 1;
+#endif
+    slim_android_unlock_framebuffer(window);
+#endif
     ANativeWindow_release(window);
     slim_input_values[5] = 0.0f;
     slim_input_values[9] = 0.0f;
     slim_input_values[10] = 0.0f;
   }
   if (attached_queue) AInputQueue_detachLooper(attached_queue);
-  free(slim_framebuffer);
   slim_bind_framebuffer(0, 0, 0, 0);
+#if SLIM_GPU_RENDERER
+  slim_android_gpu_shutdown();
+#endif
   pthread_mutex_lock(&slim_state_mutex);
   slim_attached_queue = 0;
   slim_queue_in_flight = 0;
@@ -460,13 +524,26 @@ static void slim_set_window(ANativeWindow *window) {
   if (window) ANativeWindow_acquire(window);
   if (slim_window) ANativeWindow_release(slim_window);
   slim_window = window;
+  ++slim_window_generation;
   pthread_mutex_unlock(&slim_state_mutex);
 }
 
 static void slim_on_window_created(ANativeActivity *activity, ANativeWindow *window) {
   (void)activity;
+#if !SLIM_GPU_RENDERER
   ANativeWindow_setBuffersGeometry(window, 0, 0, WINDOW_FORMAT_RGBA_8888);
+#endif
   slim_set_window(window);
+}
+
+static void slim_on_window_resized(ANativeActivity *activity, ANativeWindow *window) {
+  ALooper *looper;
+  (void)activity;
+  pthread_mutex_lock(&slim_state_mutex);
+  if (slim_window == window) ++slim_window_generation;
+  looper = slim_game_looper;
+  pthread_mutex_unlock(&slim_state_mutex);
+  if (looper) ALooper_wake(looper);
 }
 
 static void slim_on_window_destroyed(ANativeActivity *activity, ANativeWindow *window) {
@@ -475,6 +552,7 @@ static void slim_on_window_destroyed(ANativeActivity *activity, ANativeWindow *w
   if (slim_window == window) {
     ANativeWindow_release(slim_window);
     slim_window = 0;
+    ++slim_window_generation;
     slim_clear_raw_input_locked();
   }
   pthread_mutex_unlock(&slim_state_mutex);
@@ -618,6 +696,7 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *saved_state, size
   activity->callbacks->onDestroy = slim_on_destroy;
   activity->callbacks->onWindowFocusChanged = slim_on_focus_changed;
   activity->callbacks->onNativeWindowCreated = slim_on_window_created;
+  activity->callbacks->onNativeWindowResized = slim_on_window_resized;
   activity->callbacks->onNativeWindowDestroyed = slim_on_window_destroyed;
   activity->callbacks->onInputQueueCreated = slim_on_input_queue_created;
   activity->callbacks->onInputQueueDestroyed = slim_on_input_queue_destroyed;
