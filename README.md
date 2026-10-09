@@ -7,6 +7,13 @@ input. Independent of Stasis. See [PLAN.md](PLAN.md) for scope and milestones.
 The same source builds to WASM or JavaScript. See [PROGRESS.md](PROGRESS.md)
 for ZIP comparisons, validation, and current limits.
 
+An optional [native size experiment](NATIVE.md) compiles the same source to C
+and builds Windows executables or Android APKs with all content embedded.
+Run `npm run build:native -- examples/rainbow.slim --target all` to compare
+native compiler profiles. The existing JavaScript/WASM build stays unchanged.
+Run `npm run build:tiny -- examples/boxpush.slim` to put the portable Windows,
+Android, and offline browser versions together in `dist/tiny/boxpush/`.
+
 ## Build
 
 Requires modern Node.js, Python 3, and Binaryen's `wasm-dis` for readable WAT.
