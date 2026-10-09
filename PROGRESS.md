@@ -1,8 +1,12 @@
 # Slim comparison checkpoint
 
 The measurements below preserve earlier milestones. See
-[CONTENT_PLAN.md](CONTENT_PLAN.md) for the current arrays, reusable content,
-sound, and Shardbound implementation checkpoint. Fresh builds select among
+[CONTENT_PLAN.md](CONTENT_PLAN.md) for the arrays, reusable content,
+sound, and Shardbound implementation checkpoint, and
+[PACKED_TRIANGLES.md](PACKED_TRIANGLES.md) for the WASM atlas experiment.
+See [INTEGER_ARRAYS.md](INTEGER_ARRAYS.md) for exact integer storage, level
+ranges, and current release measurements.
+Fresh builds select among
 plain, Oz, Os, O4, and converged Oz by complete ZIP size.
 
 Built independently of Stasis with Luna Max agents and a focused Sol medium review.

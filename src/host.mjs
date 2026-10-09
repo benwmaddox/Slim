@@ -6,7 +6,161 @@
  * default, with an external URL available when that makes the ZIP smaller.
  */
 
-const BUILTINS = new Set(['tri', 'sound', 'input']);
+const MATH_BUILTINS = ['sin', 'cos', 'atan2', 'pow'];
+const BUILTINS = new Set(['tri', 'sound', 'input', 'text', ...MATH_BUILTINS]);
+export const MINIFIED_WASM_IMPORT_NAMES = Object.freeze({
+  tri: 'a',
+  sound: 'b',
+  input: 'c',
+  text: 'd',
+  sin: 'e',
+  cos: 'f',
+  atan2: 'g',
+  pow: 'h',
+});
+export const MINIFIED_WASM_EXPORT_NAMES = Object.freeze({init: 'a', frame: 'b'});
+const ORIGINAL_WASM_IMPORT_NAMES = Object.freeze(Object.fromEntries(
+  Object.entries(MINIFIED_WASM_IMPORT_NAMES).map(([name, compactName]) => [compactName, name])
+));
+const SOUND_PACKINGS = new Set(['none', 'numbers', 'bytes']);
+const SOUND_PRESETS = Object.freeze([
+  Object.freeze([Object.freeze([0, 7, 0, .14, 1, .85])]),
+  Object.freeze([
+    Object.freeze([12, -2, 0, .15, 1, .72]),
+    Object.freeze([19, -4, .035, .12, 0, .42])
+  ]),
+  Object.freeze([Object.freeze([0, -12, 0, .25, 3, .82])]),
+  Object.freeze([
+    Object.freeze([0, 0, 0, .34, 0, .52]),
+    Object.freeze([4, 0, .055, .32, 0, .48]),
+    Object.freeze([7, 0, .11, .30, 1, .42]),
+    Object.freeze([12, 0, .165, .28, 0, .32])
+  ]),
+  Object.freeze([
+    Object.freeze([7, 4, 0, .20, 1, .52]),
+    Object.freeze([12, 0, .07, .24, 0, .38])
+  ])
+]);
+
+function normalizeSoundPacking(value) {
+  if (value === undefined) return 'none';
+  if (!SOUND_PACKINGS.has(value)) {
+    throw new TypeError('soundPacking must be one of "none", "numbers", or "bytes"');
+  }
+  return value;
+}
+
+function soundLiteral(value) {
+  let text = Number(value).toFixed(3).replace(/0+$/, '');
+  if (text.endsWith('.')) text = text.slice(0, -1);
+  else if (text.slice(text.indexOf('.') + 1).length === 1) text += '0';
+  return text.replace(/^-?0\./, (prefix) => prefix[0] === '-' ? '-.' : '.');
+}
+
+function quantizeSound(value, scale, field, index) {
+  const packed = Math.round(value * scale);
+  if (!Number.isFinite(value) || !Number.isSafeInteger(packed) || packed / scale !== value) {
+    throw new RangeError(`Sound preset voice ${index} has an unrepresentable ${field}`);
+  }
+  return packed;
+}
+
+function packedSoundRecords() {
+  const records = [];
+  let index = 0;
+  for (const preset of SOUND_PRESETS) {
+    for (const record of preset) {
+      records.push([
+        record[0],
+        record[1],
+        quantizeSound(record[2], 200, 'delay', index),
+        quantizeSound(record[3], 200, 'duration', index),
+        record[4],
+        quantizeSound(record[5], 100, 'gain', index)
+      ]);
+      index += 1;
+    }
+  }
+  return records;
+}
+
+function soundDataFor(mode) {
+  const records = packedSoundRecords();
+  const starts = [];
+  let start = 0;
+  for (const preset of SOUND_PRESETS) {
+    starts.push(start, preset.length);
+    start += preset.length;
+  }
+
+  if (mode === 'none') {
+    const presets = SOUND_PRESETS.map((preset) =>
+      `  [${preset.map((record) => `[${record.map(soundLiteral).join(', ')}]`).join(', ')}]`
+    ).join(',\n');
+    return {
+      declaration: `presets = [\n${presets}\n], waves = ['sine', 'triangle', 'square', 'sawtooth'];`,
+      presetCount: 'presets.length',
+      voiceParameter: 'd',
+      voiceSetup: '',
+      pitch: 'd[0]',
+      sweep: 'd[1]',
+      delay: 'd[2]',
+      duration: 'd[3]',
+      wave: 'd[4]',
+      gain: 'd[5]',
+      loop: 'for (var j = 0, set = presets[id]; j < set.length; j++) voice(p, n, set[j]);'
+    };
+  }
+
+  const numbers = records.flat();
+  const numberSource = numbers.join(', ');
+  const startSource = starts.join(', ');
+  if (mode === 'numbers') {
+    return {
+      declaration: `soundData = [${numberSource}], soundSets = [${startSource}], waves = ['sine', 'triangle', 'square', 'sawtooth'];`,
+      presetCount: '(soundSets.length / 2)',
+      voiceParameter: 'index',
+      voiceSetup: 'var k = index * 6, pitchOffset = soundData[k], sweep = soundData[k + 1], delay = soundData[k + 2] / 200, duration = soundData[k + 3] / 200, wave = soundData[k + 4], gain = soundData[k + 5] / 100;',
+      pitch: 'pitchOffset',
+      sweep: 'sweep',
+      delay: 'delay',
+      duration: 'duration',
+      wave: 'wave',
+      gain: 'gain',
+      loop: 'for (var j = soundSets[id * 2], end = j + soundSets[id * 2 + 1]; j < end; j++) voice(p, n, j);'
+    };
+  }
+
+  const chars = [];
+  for (const record of records) {
+    const codes = [
+      record[0] + 81,
+      record[1] + 81,
+      record[2] + 33,
+      record[3] + 33,
+      record[4] + 33,
+      record[5] + 33
+    ];
+    if (codes.some((code) => code < 33 || code > 126)) {
+      throw new RangeError('Sound preset data does not fit printable ASCII');
+    }
+    chars.push(...codes.map((code) => String.fromCharCode(code)));
+  }
+  const packed = chars.join('').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  return {
+    declaration: `soundData = '${packed}', soundSets = [${startSource}], waves = ['sine', 'triangle', 'square', 'sawtooth'];`,
+    presetCount: '(soundSets.length / 2)',
+    voiceParameter: 'index',
+    voiceSetup: 'var k = index * 6, pitchOffset = soundData.charCodeAt(k) - 81, sweep = soundData.charCodeAt(k + 1) - 81, delay = (soundData.charCodeAt(k + 2) - 33) / 200, duration = (soundData.charCodeAt(k + 3) - 33) / 200, wave = soundData.charCodeAt(k + 4) - 33, gain = (soundData.charCodeAt(k + 5) - 33) / 100;',
+    pitch: 'pitchOffset',
+    sweep: 'sweep',
+    delay: 'delay',
+    duration: 'duration',
+    wave: 'wave',
+    gain: 'gain',
+    loop: 'for (var j = soundSets[id * 2], end = j + soundSets[id * 2 + 1]; j < end; j++) voice(p, n, j);'
+  };
+}
 
 function bytesOf(value) {
   if (value instanceof Uint8Array) return value;
@@ -44,25 +198,32 @@ function html(value) {
 
 function scanImports(wasm) {
   let source;
+  let exports;
   try {
-    source = WebAssembly.Module.imports(new WebAssembly.Module(wasm));
+    const module = new WebAssembly.Module(wasm);
+    source = WebAssembly.Module.imports(module);
+    exports = WebAssembly.Module.exports(module);
   } catch (error) {
     throw new TypeError(`wasmBytes must be a valid WASM module: ${error.message}`);
   }
+  const compactExportNames = new Set(Object.values(MINIFIED_WASM_EXPORT_NAMES));
+  const minifiedInterface = exports.length === compactExportNames.size &&
+    exports.every(({name, kind}) => kind === 'function' && compactExportNames.has(name));
   const used = new Set();
   const modules = new Set();
   for (const descriptor of source) {
+    const name = minifiedInterface ? ORIGINAL_WASM_IMPORT_NAMES[descriptor.name] : descriptor.name;
     if (descriptor.kind !== 'function') {
       throw new Error(`Unsupported WASM import ${descriptor.module}.${descriptor.name} (${descriptor.kind})`);
     }
-    if (descriptor.module !== 'e' || !BUILTINS.has(descriptor.name)) {
+    if (descriptor.module !== 'e' || !BUILTINS.has(name)) {
       throw new Error(`Unsupported WASM import ${descriptor.module}.${descriptor.name}`);
     }
-    used.add(descriptor.name);
+    used.add(name);
     modules.add(descriptor.module);
   }
 
-  return { used, modules };
+  return { used, modules, minifiedInterface };
 }
 
 function scanJavaScriptImports(source) {
@@ -81,6 +242,34 @@ function scanJavaScriptImports(source) {
     used.add(name);
   }
   return { used, modules: used.size ? new Set(['e']) : new Set() };
+}
+
+// Text is drawn on a transparent 2D canvas stacked over the WebGL one. Each
+// string is a <template id="t<N>"> in the page, read once and cached; the
+// overlay is cleared before every simulation tick like the triangle buffer.
+function textHost() {
+  return `
+var o = document.getElementById('o'), q = o.getContext('2d'), C = [], P = ['#fff', '#f4c04a', '#7ee8a2', '#8d9ac0'];
+function fit() {
+  var r = o.getBoundingClientRect(), d = devicePixelRatio || 1;
+  o.width = r.width * d;
+  o.height = r.height * d;
+  q.setTransform(o.width / 800, 0, 0, o.height / 600, 0, 0);
+  q.textAlign = 'center';
+  q.lineJoin = 'round';
+}
+function text(i, x, y, s, k) {
+  var t = C[i] || (C[i] = document.getElementById('t' + i).content.textContent);
+  q.font = 'bold ' + s + 'px system-ui,sans-serif';
+  q.lineWidth = s / 5;
+  q.strokeStyle = '#080a16';
+  q.strokeText(t, x, y);
+  q.fillStyle = P[k | 0] || '#fff';
+  q.fillText(t, x, y);
+  return 0;
+}
+addEventListener('resize', fit);
+fit();`;
 }
 
 function triangleHost() {
@@ -130,15 +319,10 @@ function draw() {
 }
 
 // Sound pitch is a semitone offset from 220 Hz. Gain is 0..1; zero is silent.
-function soundHost() {
+function soundHost(soundPacking = 'none') {
+  const data = soundDataFor(normalizeSoundPacking(soundPacking));
   return `
-var ac, voices = [], presets = [
-  [[0, 7, 0, .14, 1, .85]],
-  [[12, -2, 0, .15, 1, .72], [19, -4, .035, .12, 0, .42]],
-  [[0, -12, 0, .25, 3, .82]],
-  [[0, 0, 0, .34, 0, .52], [4, 0, .055, .32, 0, .48], [7, 0, .11, .30, 1, .42], [12, 0, .165, .28, 0, .32]],
-  [[7, 4, 0, .20, 1, .52], [12, 0, .07, .24, 0, .38]]
-], waves = ['sine', 'triangle', 'square', 'sawtooth'];
+var ac, voices = [], ${data.declaration}
 function unlock() {
   var A = window.AudioContext || window.webkitAudioContext;
   if (!A) return;
@@ -164,7 +348,7 @@ function rampTo(a, v, t) {
   if (a.exponentialRampToValueAtTime) a.exponentialRampToValueAtTime(v, t);
   else if (a.linearRampToValueAtTime) a.linearRampToValueAtTime(v, t);
 }
-function voice(p, n, d) {
+function voice(p, n, ${data.voiceParameter}) {
   while (voices.length >= 8) {
     var old = voices.shift();
     try { old.o.stop(); } catch (e) {}
@@ -175,22 +359,22 @@ function voice(p, n, d) {
     o = ac.createOscillator();
     q = ac.createGain();
     x = {o: o, q: q};
-    var t = (isFinite(ac.currentTime) ? ac.currentTime : 0) + d[2];
-    var f = 220 * Math.pow(2, (p + d[0]) / 12);
-    var z = f * Math.pow(2, d[1] / 12);
-    o.type = waves[d[4]];
+    ${data.voiceSetup ? `${data.voiceSetup}\n    ` : ''}var t = (isFinite(ac.currentTime) ? ac.currentTime : 0) + ${data.delay};
+    var f = 220 * Math.pow(2, (p + ${data.pitch}) / 12);
+    var z = f * Math.pow(2, ${data.sweep} / 12);
+    o.type = waves[${data.wave}];
     setAt(o.frequency, f, t);
-    if (d[1]) rampTo(o.frequency, z, t + d[3]);
-    var a = Math.min(.006, d[3] * .2), level = Math.max(.0001, n * d[5]);
+    if (${data.sweep}) rampTo(o.frequency, z, t + ${data.duration});
+    var a = Math.min(.006, ${data.duration} * .2), level = Math.max(.0001, n * ${data.gain});
     setAt(q.gain, .0001, t);
     rampTo(q.gain, level, t + a);
-    rampTo(q.gain, .0001, t + d[3]);
+    rampTo(q.gain, .0001, t + ${data.duration});
     o.connect(q);
     q.connect(ac.destination);
     o.onended = function () { forget(x); };
     voices.push(x);
     o.start(t);
-    o.stop(t + d[3] + .025);
+    o.stop(t + ${data.duration} + .025);
   } catch (e) {
     forget(x);
     try { if (o) o.disconnect(); } catch (x) {}
@@ -210,10 +394,10 @@ function sound(i, p, g) {
     p = +p;
     if (!isFinite(p)) p = 0;
     p = Math.max(-48, Math.min(48, p));
-    var id = (i | 0) % presets.length;
-    if (id < 0) id += presets.length;
+    var id = (i | 0) % ${data.presetCount};
+    if (id < 0) id += ${data.presetCount};
     var n = Math.min(1, g);
-    for (var j = 0, set = presets[id]; j < set.length; j++) voice(p, n, set[j]);
+    ${data.loop}
   } catch (e) {}
   return 0;
 }`;
@@ -257,7 +441,7 @@ c.addEventListener('pointercancel', function (e) {
   ph = 0;
 });`;
   return `
-var held = [0, 0, 0, 0, 0], pressed = 0, restart = 0${pointerState};
+var held = [0, 0, 0, 0, 0], pressed = 0, restart = 0, menu = 0${pointerState};
 ${pointerListeners}
 function key(e, on) {
   var k = e.key.toLowerCase();
@@ -268,6 +452,7 @@ function key(e, on) {
     e.preventDefault();
   }
   if (on && k === 'r' && !e.repeat) restart = 1;
+  if (on && (k === 'escape' || k === 'm') && !e.repeat) menu = 1;
 }
 function input(i) {
   switch (i | 0) {
@@ -279,6 +464,7 @@ function input(i) {
     case 5: return pressed;
 ${pointerInputs}
     case 9: return restart;
+    case 10: return menu;
     default: return 0;
   }
 }
@@ -286,27 +472,33 @@ addEventListener('keydown', function (e) { key(e, 1); });
 addEventListener('keyup', function (e) { key(e, 0); });
 addEventListener('blur', function () {
   held[0] = held[1] = held[2] = held[3] = held[4]${keyboardOnly ? '' : ' = ph'} = 0;
-  pressed = restart = 0;
+  pressed = restart = menu = 0;
 });
 ${pointerEvents}`;
 }
 
-function makeRuntime({ used, modules, boot, keyboardOnly = false }) {
+function makeRuntime({ used, modules, boot, keyboardOnly = false, soundPacking = 'none', minifiedInterface = false }) {
   const pieces = [];
   if (used.has('tri')) pieces.push(triangleHost());
-  if (used.has('sound')) pieces.push(soundHost());
+  if (used.has('sound')) pieces.push(soundHost(soundPacking));
   if (used.has('input')) pieces.push(inputHost(used.has('sound') ? 'unlock()' : '', keyboardOnly));
+  if (used.has('text')) pieces.push(textHost());
 
   const imports = [];
   for (const module of modules) imports.push(`I[${JSON.stringify(module)}]=E`);
   const e = [];
-  if (used.has('tri')) e.push('tri:tri');
-  if (used.has('sound')) e.push('sound:sound');
-  if (used.has('input')) e.push('input:input');
+  const importKey = (name) => minifiedInterface ? MINIFIED_WASM_IMPORT_NAMES[name] : name;
+  if (used.has('tri')) e.push(`${importKey('tri')}:tri`);
+  if (used.has('sound')) e.push(`${importKey('sound')}:sound`);
+  if (used.has('input')) e.push(`${importKey('input')}:input`);
+  if (used.has('text')) e.push(`${importKey('text')}:text`);
+  for (const name of MATH_BUILTINS) if (used.has(name)) e.push(`${importKey(name)}:Math.${name}`);
   const setupGpu = used.has('tri') ? 'gpu()' : '';
   const draw = used.has('tri') ? 'draw()' : '';
-  const clear = used.has('tri') ? 'v.length=0;' : '';
-  const inputTick = used.has('input') ? 'pressed=restart=0;' : '';
+  const clear = (used.has('tri') ? 'v.length=0;' : '') + (used.has('text') ? 'q.clearRect(0,0,800,600);' : '');
+  const inputTick = used.has('input') ? 'pressed=restart=menu=0;' : '';
+  const init = minifiedInterface ? `g[${JSON.stringify(MINIFIED_WASM_EXPORT_NAMES.init)}]()` : 'g.init()';
+  const frame = minifiedInterface ? `g[${JSON.stringify(MINIFIED_WASM_EXPORT_NAMES.frame)}]()` : 'g.frame()';
   const audioUnlock = used.has('sound')
     ? keyboardOnly ? 'addEventListener("keydown",unlock)' : 'addEventListener("keydown",unlock);addEventListener("pointerdown",unlock)'
     : '';
@@ -320,7 +512,7 @@ function makeRuntime({ used, modules, boot, keyboardOnly = false }) {
   ${audioUnlock};
   function start(g) {
     ${setupGpu}
-    g.init();
+    ${init};
     ${draw}
     var d = 1000 / 60, a = 0, p = performance.now();
     function f(t) {
@@ -329,7 +521,7 @@ function makeRuntime({ used, modules, boot, keyboardOnly = false }) {
       var n = Math.min(5, a / d | 0);
       for (var i = 0; i < n; i++) {
         ${clear}
-        g.frame();
+        ${frame};
         ${inputTick}
       }
       a -= n * d;
@@ -344,40 +536,45 @@ function makeRuntime({ used, modules, boot, keyboardOnly = false }) {
 
 /**
  * @param {ArrayBuffer|ArrayBufferView} wasmBytes
- * @param {{title?: string, wasmUrl?: string, keyboardOnly?: boolean}} [options]
+ * @param {{title?: string, wasmUrl?: string, keyboardOnly?: boolean, soundPacking?: 'none'|'numbers'|'bytes', footer?: string}} [options]
  * `wasmUrl` selects an external fetch layout; otherwise the module is embedded.
  * Sound pitch uses semitone offsets from 220 Hz and gain 0..1, where zero is silent.
  * @returns {string} a complete, self-contained HTML document
  */
 export function makeHtml(wasmBytes, options = {}) {
+  const soundPacking = normalizeSoundPacking(options.soundPacking);
   const bytes = bytesOf(wasmBytes);
-  const { used, modules } = scanImports(bytes);
+  const { used, modules, minifiedInterface } = scanImports(bytes);
   const title = html(options.title);
   const keyboardOnly = options.keyboardOnly === true;
   const boot = options.wasmUrl == null
     ? `var z=atob('${base64(bytes)}'),w=new Uint8Array(z.length),j=0;for(;j<z.length;j++)w[j]=z.charCodeAt(j);WebAssembly.instantiate(w,I).then(function(x){return x.instance.exports})`
     : `fetch(${JSON.stringify(options.wasmUrl).replace(/</g, '\\u003c')}).then(function(r){if(!r.ok)throw Error('WASM '+r.status);return r.arrayBuffer()}).then(function(w){return WebAssembly.instantiate(w,I)}).then(function(x){return x.instance.exports})`;
-  const runtime = makeRuntime({ used, modules, boot, keyboardOnly });
-  return page(title, runtime, keyboardOnly);
+  const runtime = makeRuntime({ used, modules, boot, keyboardOnly, soundPacking, minifiedInterface });
+  return page(title, runtime, keyboardOnly, options.footer, options.texts, used);
 }
 
-function page(title, runtime, keyboardOnly = false) {
-  const footer = keyboardOnly ? 'Arrows/A-D: move · Space: jump · R: restart' : 'Arrows/WASD · Space · Mouse/Touch · R restarts';
-  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href="data:,"><title>${title}</title><style>html,body{margin:0;width:100%;height:100%;background:#111;color:#fff;font:14px system-ui}main{height:100%;display:grid;place-items:center;align-content:center;gap:4px;text-align:center}canvas{display:block;width:min(100vw,calc((100vh - 24px)*4/3));height:auto;aspect-ratio:4/3;touch-action:none}p{margin:0;opacity:.7}</style><main><canvas width=800 height=600></canvas><p>${footer}</p></main><script>${runtime}</script>`;
+function page(title, runtime, keyboardOnly = false, footerText, texts = [], used = new Set()) {
+  if (used.has('text') && !texts.length) throw new Error('The game draws text but the page has no texts; add `// text:` lines to the source');
+  const overlay = used.has('text') ? '<canvas id=o width=800 height=600></canvas>' : '';
+  const templates = texts.map((text, index) => `<template id=t${index}>${html(text)}</template>`).join('');
+  const footer = footerText ?? (keyboardOnly ? 'Arrows/A-D: move · Space: jump · R: restart' : 'Arrows/WASD · Space · Mouse/Touch · R restarts');
+  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href="data:,"><title>${title}</title><style>html,body{margin:0;width:100%;height:100%;background:#111;color:#fff;font:14px system-ui}main{height:100%;display:grid;place-items:center;align-content:center;gap:4px;text-align:center}canvas{display:block;width:min(100vw,calc((100vh - 24px)*4/3));height:auto;aspect-ratio:4/3;touch-action:none;grid-area:1/1}#o{pointer-events:none}p{margin:0;opacity:.7}</style><main><div style=display:grid><canvas width=800 height=600></canvas>${overlay}</div><p>${html(footer)}</p></main>${templates}<script>${runtime}</script>`;
 }
 
 /**
  * @param {string} code a factory expression accepting the host object `e`
- * @param {{title?: string, imports?: Iterable<string>|Record<string, boolean>, keyboardOnly?: boolean}} [options]
+ * @param {{title?: string, imports?: Iterable<string>|Record<string, boolean>, keyboardOnly?: boolean, soundPacking?: 'none'|'numbers'|'bytes', footer?: string}} [options]
  * @returns {string} a complete, self-contained HTML document
  */
 export function makeJavaScriptHtml(code, options = {}) {
+  const soundPacking = normalizeSoundPacking(options.soundPacking);
   if (typeof code !== 'string' || !code.trim()) throw new TypeError('JavaScript game code must be a factory expression');
   const { used, modules } = scanJavaScriptImports(options.imports);
   const title = html(options.title);
   const keyboardOnly = options.keyboardOnly === true;
   const boot = `Promise.resolve((${code})(E))`;
-  return page(title, makeRuntime({ used, modules, boot, keyboardOnly }), keyboardOnly);
+  return page(title, makeRuntime({ used, modules, boot, keyboardOnly, soundPacking }), keyboardOnly, options.footer, options.texts, used);
 }
 
 export default makeHtml;

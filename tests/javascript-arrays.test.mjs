@@ -108,3 +108,47 @@ test('dynamic constant array initializers round trip through native JS, f32 JS, 
     assert.ok(Object.is(f32Value, expected[index]), `f32 JS value ${index}`);
   }
 });
+
+test('shares a typed-array initializer helper without changing signed zero or mutable array ownership', () => {
+  const zeroArray = compileJavaScript(`
+    global values = [0; 2];
+    fn init() {}
+    fn frame() { return values[input(0)]; }
+  `);
+  assert.match(zeroArray.code, /new Float32Array\(2\)/);
+  assert.doesNotMatch(zeroArray.code, /\.fill\(0\)/);
+
+  const source = `
+    const SIGN = [-0, 0.5];
+    const EXTRA = [1, 2];
+    global values = [0; 2];
+    fn init() {}
+    fn frame() {
+      let index = input(0);
+      if (index == 0) {
+        return 1 / SIGN[index];
+      }
+      if (input(1)) {
+        values[index] = input(2);
+      }
+      return EXTRA[index] + values[index];
+    }
+  `;
+
+  for (const precision of ['native', 'f32']) {
+    const result = compileJavaScript(source, {precision});
+    assert.match(result.code, /const makeArray = \(values\) => new Float32Array\(values\);/);
+
+    let input = [0, 0, 0];
+    const factory = Function(`return (${result.code});`)();
+    const first = factory({input: (index) => input[index]});
+    const second = factory({input: (index) => input[index]});
+
+    assert.equal(first.frame(), -Infinity, `${precision} preserves negative zero`);
+    input = [1, 1, 5];
+    assert.equal(first.frame(), 7, `${precision} initializes a fresh mutable array`);
+    input = [1, 0, 0];
+    assert.equal(first.frame(), 7, `${precision} keeps mutations in one runtime`);
+    assert.equal(second.frame(), 2, `${precision} gives each runtime independent arrays`);
+  }
+});

@@ -7,20 +7,56 @@
  * represented as f32 0/1 values so game code can use them in arithmetic too.
  */
 
-const BUILTIN_ORDER = ["tri", "sound", "input"];
+const SVG_METADATA_BUILTIN = "svg_group";
+const SVG_TRI_BUILTIN = "svg_tri";
+// Math functions WebAssembly has no instruction for. WASM modules import them
+// from the host (which passes JavaScript's Math function through); the
+// JavaScript backend calls Math directly.
+export const MATH_IMPORTS = Object.freeze({
+  sin: Object.freeze({ params: 1, result: true }),
+  cos: Object.freeze({ params: 1, result: true }),
+  atan2: Object.freeze({ params: 2, result: true }),
+  pow: Object.freeze({ params: 2, result: true }),
+});
+const BUILTIN_ORDER = ["tri", "sound", "input", SVG_METADATA_BUILTIN, SVG_TRI_BUILTIN, "text", ...Object.keys(MATH_IMPORTS)];
 
 const BUILTINS = Object.freeze({
   tri: Object.freeze({ params: 9, result: true }),
   sound: Object.freeze({ params: 3, result: true }),
   input: Object.freeze({ params: 1, result: true }),
+  [SVG_METADATA_BUILTIN]: Object.freeze({ params: 1, result: true }),
+  [SVG_TRI_BUILTIN]: Object.freeze({ params: 10, result: true }),
+  // text(id, x, y, size, tone): draws the page's <template id="t<id>"> text.
+  text: Object.freeze({ params: 5, result: true }),
+  ...MATH_IMPORTS,
 });
 
-const F32 = 0x7d;
+// Pure numeric builtins that compile to a single WebAssembly f32 instruction
+// (and to the matching Math function in JavaScript); they need no host import.
+// `round` is deliberately absent: Math.round rounds halves up while
+// f32.nearest rounds them to even, so the two backends would disagree.
+export const INTRINSICS = Object.freeze({
+  floor: Object.freeze({ params: 1, opcode: 0x8e, js: "Math.floor" }),
+  ceil: Object.freeze({ params: 1, opcode: 0x8d, js: "Math.ceil" }),
+  trunc: Object.freeze({ params: 1, opcode: 0x8f, js: "Math.trunc" }),
+  sqrt: Object.freeze({ params: 1, opcode: 0x91, js: "Math.sqrt" }),
+  abs: Object.freeze({ params: 1, opcode: 0x8b, js: "Math.abs" }),
+  min: Object.freeze({ params: 2, opcode: 0x96, js: "Math.min" }),
+  max: Object.freeze({ params: 2, opcode: 0x97, js: "Math.max" }),
+});
 
-function compileError(message, token) {
+const isReservedName = (name) => Object.hasOwn(BUILTINS, name) || Object.hasOwn(INTRINSICS, name);
+
+const F32 = 0x7d;
+const TRIANGLE_PACK_ENCODING = "triangles-i8-palette-f32";
+const PACKED_TRIANGLE_UNSUPPORTED = "SLIM_PACKING_UNSUPPORTED";
+
+function compileError(message, token, code) {
   const line = token?.line ?? 1;
   const column = token?.column ?? 1;
-  throw new SyntaxError(`Slim compile error at ${line}:${column}: ${message}`);
+  const error = new SyntaxError(`Slim compile error at ${line}:${column}: ${message}`);
+  if (code !== undefined) error.code = code;
+  throw error;
 }
 
 function isIdentifierStart(ch) {
@@ -263,7 +299,7 @@ class Parser {
         if (functions.has(fn.name)) {
           compileError(`duplicate function ${JSON.stringify(fn.name)}`, fn.token);
         }
-        if (Object.hasOwn(BUILTINS, fn.name)) {
+        if (isReservedName(fn.name)) {
           compileError(`function name ${JSON.stringify(fn.name)} is reserved for a builtin`, fn.token);
         }
         functions.set(fn.name, fn);
@@ -273,6 +309,8 @@ class Parser {
     }
 
     const program = {globals, arrays, functions};
+    const outerNames = new Set([...globalNames, ...constants.map((constant) => constant.name)]);
+    for (const fn of functions.values()) scopeLocals(fn, outerNames);
     const lowered = constants.length === 0 ? program : lowerConstants(program, constants);
     return resolveArrays(lowered);
   }
@@ -569,6 +607,108 @@ function collectFunctionLocalNames(fn) {
   return names;
 }
 
+// Locals are block scoped: a name may be declared again in a sibling block, and
+// a use before its declaration refers to the outer name (a global or constant).
+// Redeclaring a name that is already visible (a parameter or an enclosing local)
+// is still an error.  This pass gives every declaration a unique function-wide
+// name (`name`, then `name$1`, ...) and rewrites its uses, so the layout and
+// code generation of both backends keep treating locals as one flat set.
+// `$` cannot appear in source identifiers, so generated names never collide.
+function scopeLocals(fn, outerNames) {
+  const used = new Set();
+  const scopes = [new Map()];
+  const lookup = (name) => {
+    for (let index = scopes.length - 1; index >= 0; index -= 1) {
+      if (scopes[index].has(name)) return scopes[index].get(name);
+    }
+    return undefined;
+  };
+  const declare = (node) => {
+    if (lookup(node.name) !== undefined) {
+      compileError(`duplicate local ${JSON.stringify(node.name)}`, node.token);
+    }
+    let unique = node.name;
+    // Locals named like a global or constant always get a fresh name, so that
+    // name stays visible outside the block (or before the let) that shadows it.
+    for (let count = 1; used.has(unique) || (unique === node.name && outerNames.has(unique)); count += 1) {
+      unique = `${node.name}$${count}`;
+    }
+    used.add(unique);
+    scopes[scopes.length - 1].set(node.name, unique);
+    node.name = unique;
+  };
+  for (const parameter of fn.params) declare(parameter);
+
+  const rewriteExpression = (expression) => {
+    switch (expression.kind) {
+      case "name": {
+        const unique = lookup(expression.name);
+        if (unique !== undefined) expression.name = unique;
+        break;
+      }
+      case "unary":
+        rewriteExpression(expression.expression);
+        break;
+      case "binary":
+        rewriteExpression(expression.left);
+        rewriteExpression(expression.right);
+        break;
+      case "call":
+        expression.args.forEach(rewriteExpression);
+        break;
+      case "index":
+        rewriteExpression(expression.index);
+        break;
+      default:
+        break;
+    }
+  };
+  const rewriteBlock = (statements) => {
+    scopes.push(new Map());
+    statements.forEach(rewriteStatement);
+    scopes.pop();
+  };
+  function rewriteStatement(statement) {
+    switch (statement.kind) {
+      case "let":
+        rewriteExpression(statement.expression);
+        declare(statement);
+        break;
+      case "assign": {
+        rewriteExpression(statement.expression);
+        const unique = lookup(statement.name);
+        if (unique !== undefined) statement.name = unique;
+        break;
+      }
+      case "arrayAssign":
+        rewriteExpression(statement.index);
+        rewriteExpression(statement.expression);
+        break;
+      case "expr":
+        rewriteExpression(statement.expression);
+        break;
+      case "return":
+        if (statement.expression) rewriteExpression(statement.expression);
+        break;
+      case "if":
+        rewriteExpression(statement.condition);
+        rewriteBlock(statement.thenBlock.body);
+        if (statement.elseBlock) rewriteBlock(statement.elseBlock.body);
+        break;
+      case "while":
+        rewriteExpression(statement.condition);
+        rewriteBlock(statement.body.body);
+        break;
+      case "block":
+        rewriteBlock(statement.body);
+        break;
+      default:
+        break;
+    }
+  }
+  fn.body.forEach(rewriteStatement);
+}
+
 function lowerConstants(program, declarations) {
   const constants = new Map(declarations.map((constant) => [constant.name, constant]));
   const globalNames = new Set(program.globals.map((global) => global.name));
@@ -585,7 +725,7 @@ function lowerConstants(program, declarations) {
     if (functionNames.has(constant.name)) {
       compileError(`constant name ${JSON.stringify(constant.name)} collides with a function`, constant.token);
     }
-    if (Object.hasOwn(BUILTINS, constant.name)) {
+    if (isReservedName(constant.name)) {
       compileError(`constant name ${JSON.stringify(constant.name)} is reserved for a builtin`, constant.token);
     }
   }
@@ -752,7 +892,7 @@ function resolveArrays(program) {
     if (functionNames.has(array.name)) {
       compileError(`array name ${JSON.stringify(array.name)} collides with a function`, array.token);
     }
-    if (Object.hasOwn(BUILTINS, array.name)) {
+    if (isReservedName(array.name)) {
       compileError(`array name ${JSON.stringify(array.name)} is reserved for a builtin`, array.token);
     }
 
@@ -958,7 +1098,31 @@ function walkStatement(statement, visitor) {
   }
 }
 
-function prepareReachability(program) {
+function collectSvgTriCallSites(program) {
+  const ids = new Map();
+  const descriptors = [];
+  let nextId = 1;
+  for (const fn of program.functions.values()) {
+    for (const statement of fn.body) {
+      walkStatement(statement, (node) => {
+        if (node.kind !== "call" || node.name !== "tri" || ids.has(node)) return;
+        const id = nextId;
+        nextId += 1;
+        ids.set(node, id);
+        descriptors.push({
+          id,
+          function: fn.name,
+          line: node.token?.line ?? 0,
+          column: node.token?.column ?? 0,
+        });
+      });
+    }
+  }
+  return {ids, descriptors};
+}
+
+function prepareReachability(program, options = {}) {
+  const svgMetadata = options.svgMetadata === true;
   const functions = new Map(program.functions);
   for (const root of ["init", "frame"]) {
     if (!functions.has(root)) {
@@ -985,11 +1149,23 @@ function prepareReachability(program) {
     for (const statement of fn.body) {
       walkStatement(statement, (node) => {
         if (node.kind !== "call") return;
+        if (Object.hasOwn(INTRINSICS, node.name)) {
+          const intrinsic = INTRINSICS[node.name];
+          if (node.args.length !== intrinsic.params) {
+            compileError(`builtin ${JSON.stringify(node.name)} expects ${intrinsic.params} arguments, got ${node.args.length}`, node.token);
+          }
+          return;
+        }
         const builtin = Object.hasOwn(BUILTINS, node.name) ? BUILTINS[node.name] : undefined;
         if (builtin) {
-          builtinNames.add(node.name);
           if (node.args.length !== builtin.params) {
             compileError(`builtin ${JSON.stringify(node.name)} expects ${builtin.params} arguments, got ${node.args.length}`, node.token);
+          }
+          if ((node.name === SVG_METADATA_BUILTIN || node.name === SVG_TRI_BUILTIN) && !svgMetadata) return;
+          if (node.name === "tri" && svgMetadata) {
+            builtinNames.add(SVG_TRI_BUILTIN);
+          } else {
+            builtinNames.add(node.name);
           }
           return;
         }
@@ -1157,6 +1333,117 @@ function f32Bytes(value) {
   return Array.from(new Uint8Array(buffer));
 }
 
+function f32Bits(value) {
+  const buffer = new ArrayBuffer(4);
+  const view = new DataView(buffer);
+  view.setFloat32(0, value, true);
+  return view.getUint32(0, true);
+}
+
+// Compact array storage is a physical representation detail.  The Slim
+// frontend continues to expose f32 values, so only immutable arrays whose
+// already-rounded values are exact, negative-zero-free integers can use it.
+function chooseIntegerArrayEncoding(array, integerArrayStorage, packing) {
+  if (integerArrayStorage !== "compact" || array.mutable || packing) return "f32";
+
+  const values = array.values;
+  if (!values.every((value) => (
+    Number.isFinite(value) && Number.isInteger(value) && !Object.is(value, -0)
+  ))) {
+    return "f32";
+  }
+
+  if (values.every((value) => value >= 0)) {
+    if (values.every((value) => value <= 0xff)) return "u8";
+    if (values.every((value) => value <= 0xffff)) return "u16";
+    return "f32";
+  }
+  if (values.every((value) => value >= -0x80 && value <= 0x7f)) return "i8";
+  if (values.every((value) => value >= -0x8000 && value <= 0x7fff)) return "i16";
+  return "f32";
+}
+
+function integerArrayElementBytes(encoding) {
+  return encoding === "i8" || encoding === "u8" ? 1 : 2;
+}
+
+function integerArrayDataBytes(values, encoding) {
+  const bytes = [];
+  const elementBytes = integerArrayElementBytes(encoding);
+  for (const value of values) {
+    bytes.push(value & 0xff);
+    if (elementBytes === 2) bytes.push((value >>> 8) & 0xff);
+  }
+  return bytes;
+}
+
+function integerArrayLoad(encoding) {
+  switch (encoding) {
+    case "i8": return {opcode: 0x2c, conversion: 0xb2, alignment: 0x00};
+    case "u8": return {opcode: 0x2d, conversion: 0xb3, alignment: 0x00};
+    case "i16": return {opcode: 0x2e, conversion: 0xb2, alignment: 0x01};
+    case "u16": return {opcode: 0x2f, conversion: 0xb3, alignment: 0x01};
+    default: throw new Error(`internal error: unsupported integer array encoding ${JSON.stringify(encoding)}`);
+  }
+}
+
+function preparePackedTriangleArray(array) {
+  if (array.mutable) {
+    compileError(`packed triangle array ${JSON.stringify(array.name)} must be an immutable const array`, array.token, PACKED_TRIANGLE_UNSUPPORTED);
+  }
+  if (array.length % 9 !== 0) {
+    compileError(`packed triangle array ${JSON.stringify(array.name)} length must be a multiple of 9`, array.token, PACKED_TRIANGLE_UNSUPPORTED);
+  }
+
+  const dataBytes = [];
+  const paletteValues = [];
+  const paletteIndices = new Map();
+  for (let triangle = 0; triangle < array.length / 9; triangle += 1) {
+    const base = triangle * 9;
+    for (let lane = 0; lane < 6; lane += 1) {
+      const value = array.values[base + lane];
+      if (!Number.isFinite(value) || !Number.isInteger(value) || value < -128 || value > 127) {
+        compileError(
+          `packed triangle array ${JSON.stringify(array.name)} coordinate ${base + lane} must be a finite integer in [-128, 127]`,
+          array.token,
+          PACKED_TRIANGLE_UNSUPPORTED,
+        );
+      }
+      if (Object.is(value, -0)) {
+        compileError(
+          `packed triangle array ${JSON.stringify(array.name)} coordinate ${base + lane} cannot be negative zero`,
+          array.token,
+          PACKED_TRIANGLE_UNSUPPORTED,
+        );
+      }
+      dataBytes.push(value & 0xff);
+    }
+
+    const color = array.values.slice(base + 6, base + 9);
+    const key = color.map((value) => f32Bits(value)).join(":");
+    let paletteIndex = paletteIndices.get(key);
+    if (paletteIndex === undefined) {
+      paletteIndex = paletteValues.length / 3;
+      if (paletteIndex >= 256) {
+        compileError(`packed triangle array ${JSON.stringify(array.name)} palette exceeds 256 colors`, array.token, PACKED_TRIANGLE_UNSUPPORTED);
+      }
+      paletteIndices.set(key, paletteIndex);
+      paletteValues.push(...color);
+    }
+    dataBytes.push(paletteIndex);
+  }
+
+  const paletteBytes = paletteValues.flatMap((value) => f32Bytes(value));
+  return {
+    encoding: TRIANGLE_PACK_ENCODING,
+    dataBytes,
+    paletteBytes,
+    triangleCount: array.length / 9,
+    paletteSize: paletteValues.length / 3,
+    byteLength: dataBytes.length + paletteBytes.length,
+  };
+}
+
 function section(id, payload) {
   return [id, ...u32(payload.length), ...payload];
 }
@@ -1167,6 +1454,10 @@ function typeKey(params) {
 
 function emitModule(program, options = {}) {
   const globalStorage = options.globalStorage ?? "globals";
+  const packedTriangleNames = options.packedTriangleArrays ?? [];
+  const integerArrayStorage = options.integerArrayStorage ?? "f32";
+  const svgMetadata = options.svgMetadata === true;
+  const svgTriCallSites = svgMetadata ? collectSvgTriCallSites(program) : {ids: new Map(), descriptors: []};
   const globals = program.globals.map((global) => ({
     name: global.name,
     value: evalConstant(global.expression),
@@ -1176,10 +1467,18 @@ function emitModule(program, options = {}) {
   const globalLayout = globals.map((global, index) => ({name: global.name, offset: index * 4}));
   const globalOffsets = new Map(globalLayout.map((global) => [global.name, global.offset]));
 
-  const reachability = prepareReachability(program);
+  const reachability = prepareReachability(program, {svgMetadata});
   const importedNames = reachability.importedBuiltins;
 
   const arrayByName = new Map(program.arrays.map((array) => [array.name, array]));
+  const packedTriangles = new Map();
+  for (const name of packedTriangleNames) {
+    const array = arrayByName.get(name);
+    if (!array) {
+      compileError(`packed triangle target ${JSON.stringify(name)} is not a declared array`);
+    }
+    packedTriangles.set(name, preparePackedTriangleArray(array));
+  }
   const totalArrayElements = program.arrays.reduce((total, array) => total + array.length, 0);
   const dynamicArrayNames = new Set();
   for (const fn of reachability.reachable) {
@@ -1191,18 +1490,30 @@ function emitModule(program, options = {}) {
       });
     }
   }
-  const arrayStorage = program.arrays.map((array) => ({
-    declaration: array,
-    materialized: array.mutable || dynamicArrayNames.has(array.name),
-    offset: null,
-  }));
+  const arrayStorage = program.arrays.map((array) => {
+    const packing = packedTriangles.get(array.name) ?? null;
+    const encoding = packing
+      ? packing.encoding
+      : chooseIntegerArrayEncoding(array, integerArrayStorage, packing);
+    const elementBytes = packing ? null : encoding === "f32" ? 4 : integerArrayElementBytes(encoding);
+    const physicalByteLength = packing?.byteLength ?? array.length * elementBytes;
+    return {
+      declaration: array,
+      packing,
+      encoding,
+      elementBytes,
+      physicalByteLength,
+      materialized: array.mutable || dynamicArrayNames.has(array.name),
+      offset: null,
+    };
+  });
   const arrayStorageByName = new Map(arrayStorage.map((item) => [item.declaration.name, item]));
   const scalarMemoryBytes = globalStorage === "memory" ? globals.length * 4 : 0;
   let nextArrayOffset = scalarMemoryBytes;
   for (const item of arrayStorage) {
     if (!item.materialized) continue;
     item.offset = nextArrayOffset;
-    nextArrayOffset += item.declaration.byteLength;
+    nextArrayOffset += item.physicalByteLength;
   }
   const allocatedBytes = Math.max(scalarMemoryBytes, nextArrayOffset);
 
@@ -1233,6 +1544,17 @@ function emitModule(program, options = {}) {
     functionIndices.set(reachability.reachable[index].name, importCount + index);
   }
 
+  // Packed arrays are immutable, so only arrays with a reachable dynamic read
+  // need a decoder function.  Keeping the decoder out of the source
+  // reachability list preserves the public function metadata and static-fold
+  // behavior for all other arrays.
+  const packedDecoderNames = [...packedTriangles.keys()].filter((name) => dynamicArrayNames.has(name));
+  const packedDecoderTypeIndex = packedDecoderNames.length > 0 ? ensureType(1) : undefined;
+  const packedDecoderIndices = new Map(packedDecoderNames.map((name, index) => [
+    name,
+    importCount + reachability.reachable.length + index,
+  ]));
+
   const layouts = new Map();
   for (const fn of reachability.reachable) {
     layouts.set(fn.name, collectFunctionLayout(fn, globalNames));
@@ -1247,6 +1569,9 @@ function emitModule(program, options = {}) {
   for (const fn of reachability.reachable) {
     functionSection.push(...u32(functionTypeIndices.get(fn.name)));
   }
+  for (const name of packedDecoderNames) {
+    functionSection.push(...u32(packedDecoderTypeIndex));
+  }
 
   const globalsSection = [];
   if (globalStorage === "globals") {
@@ -1259,17 +1584,20 @@ function emitModule(program, options = {}) {
 
   // Keep the address itself on the stack for the common small-offset case.
   // For larger offsets, an i32.const 0 plus a memarg offset can be shorter.
-  // Both forms use natural f32 alignment (2) and offset zero in the direct
-  // form so the emitted layout is easy to inspect in WAT.
-  const memoryAccess = (opcode, offset) => {
-    const direct = [0x41, ...s32(offset), opcode, 0x02, 0x00];
-    const memarg = [0x41, 0x00, opcode, 0x02, ...u32(offset)];
+  // Keep the natural f32 alignment when an absolute address is aligned.  A
+  // packed byte array can leave the next f32 array or scalar at an unaligned
+  // address; alignment is only a hint, but emitting zero there accurately
+  // describes the access and works on every WASM engine.
+  const memoryAccess = (opcode, offset, alignment = offset % 4 === 0 ? 0x02 : 0x00) => {
+    const direct = [0x41, ...s32(offset), opcode, alignment, 0x00];
+    const memarg = [0x41, 0x00, opcode, alignment, ...u32(offset)];
     return direct.length <= memarg.length ? direct : memarg;
   };
 
   const memoryStore = (offset, value) => {
-    const direct = [0x41, ...s32(offset), ...value, 0x38, 0x02, 0x00];
-    const memarg = [0x41, 0x00, ...value, 0x38, 0x02, ...u32(offset)];
+    const alignment = offset % 4 === 0 ? 0x02 : 0x00;
+    const direct = [0x41, ...s32(offset), ...value, 0x38, alignment, 0x00];
+    const memarg = [0x41, 0x00, ...value, 0x38, alignment, ...u32(offset)];
     return direct.length <= memarg.length ? direct : memarg;
   };
 
@@ -1280,7 +1608,9 @@ function emitModule(program, options = {}) {
     arrays: arrayByName,
     arrayStorage: arrayStorageByName,
     functionIndices,
+    packedDecoderIndices,
     importedNames,
+    svgTriCallSites: svgTriCallSites.ids,
   });
 
   const emitExpr = (expression, context) => {
@@ -1316,6 +1646,29 @@ function emitModule(program, options = {}) {
           append(...emitArrayRead(node, context));
           return;
         case "call": {
+          if ((node.name === SVG_METADATA_BUILTIN || node.name === SVG_TRI_BUILTIN) && !svgMetadata) {
+            append(0x43, ...f32Bytes(0));
+            return;
+          }
+          if (node.name === "tri" && svgMetadata) {
+            const callSiteId = context.svgTriCallSites.get(node);
+            if (callSiteId === undefined) {
+              compileError("internal error: missing SVG triangle call-site identity", node.token);
+            }
+            append(0x43, ...f32Bytes(callSiteId));
+            for (const argument of node.args) emit(argument);
+            const svgTriIndex = context.importedNames.indexOf(SVG_TRI_BUILTIN);
+            if (svgTriIndex < 0) {
+              compileError("internal error: missing SVG triangle metadata import", node.token);
+            }
+            append(0x10, ...u32(svgTriIndex));
+            return;
+          }
+          if (Object.hasOwn(INTRINSICS, node.name)) {
+            for (const argument of node.args) emit(argument);
+            append(INTRINSICS[node.name].opcode);
+            return;
+          }
           const functionIndex = context.functionIndices.get(node.name);
           const builtinIndex = context.importedNames.indexOf(node.name);
           if (functionIndex === undefined && builtinIndex < 0) {
@@ -1416,7 +1769,7 @@ function emitModule(program, options = {}) {
     code.push(...condition, 0x04, 0x40, 0x00, 0x0b);
   }
 
-  function emitCheckedArrayIndex(node, context, declaration) {
+  function emitCheckedArrayIndex(node, context, declaration, leaveLogicalIndex = false, elementBytes = 4) {
     const temp = context.layout.arrayTemps.get(node);
     if (temp === undefined) {
       compileError("internal error: missing array index temporary", node.token);
@@ -1427,17 +1780,51 @@ function emitModule(program, options = {}) {
     appendTrapIf(code, [...local(), ...local(), 0x5c]);
     appendTrapIf(code, [...local(), 0x43, ...f32Bytes(declaration.length), 0x60]);
     appendTrapIf(code, [...local(), ...local(), 0x8f, 0x5c]);
-    code.push(...local(), 0xa8, 0x41, 0x02, 0x74);
+    if (leaveLogicalIndex) {
+      code.push(...local());
+      return code;
+    }
+    if (elementBytes === 4) {
+      // Keep the established f32-array sequence byte-for-byte identical.
+      code.push(...local(), 0xa8, 0x41, 0x02, 0x74);
+    } else if (elementBytes === 2) {
+      code.push(...local(), 0xa8, 0x41, 0x01, 0x74);
+    } else if (elementBytes === 1) {
+      code.push(...local(), 0xa8);
+    } else {
+      throw new Error(`internal error: unsupported array element width ${elementBytes}`);
+    }
     return code;
   }
 
   function emitArrayRead(node, context) {
     const {declaration, storage} = emitArrayInfo(node, context);
-    if (node.constantIndex !== undefined) {
-      return memoryAccess(0x2a, storage.offset + node.constantIndex * 4);
+    if (storage.packing) {
+      const decoderIndex = context.packedDecoderIndices.get(declaration.name);
+      if (decoderIndex === undefined) {
+        compileError(`internal error: missing packed decoder for array ${JSON.stringify(declaration.name)}`, node.token);
+      }
+      const code = emitCheckedArrayIndex(node, context, declaration, true);
+      code.push(0x10, ...u32(decoderIndex));
+      return code;
     }
-    const code = emitCheckedArrayIndex(node, context, declaration);
-    code.push(0x2a, 0x02, ...u32(storage.offset));
+    if (node.constantIndex !== undefined) {
+      if (storage.encoding === "f32") {
+        return memoryAccess(0x2a, storage.offset + node.constantIndex * 4);
+      }
+      const load = integerArrayLoad(storage.encoding);
+      const address = storage.offset + node.constantIndex * storage.elementBytes;
+      const alignment = address % storage.elementBytes === 0 ? load.alignment : 0x00;
+      return [...memoryAccess(load.opcode, address, alignment), load.conversion];
+    }
+    const code = emitCheckedArrayIndex(node, context, declaration, false, storage.elementBytes);
+    if (storage.encoding === "f32") {
+      code.push(0x2a, 0x02, ...u32(storage.offset));
+      return code;
+    }
+    const load = integerArrayLoad(storage.encoding);
+    const alignment = storage.offset % storage.elementBytes === 0 ? load.alignment : 0x00;
+    code.push(load.opcode, alignment, ...u32(storage.offset), load.conversion);
     return code;
   }
 
@@ -1478,6 +1865,9 @@ function emitModule(program, options = {}) {
   const emitStatements = (statements, context) => {
     const code = [];
     const append = (...bytes) => code.push(...bytes);
+    const isStrippedSvgMetadata = (expression) => !svgMetadata
+      && expression.kind === "call"
+      && (expression.name === SVG_METADATA_BUILTIN || expression.name === SVG_TRI_BUILTIN);
     for (const statement of statements) {
       switch (statement.kind) {
         case "let": {
@@ -1517,6 +1907,7 @@ function emitModule(program, options = {}) {
           break;
         }
         case "expr":
+          if (isStrippedSvgMetadata(statement.expression)) break;
           append(...emitExpr(statement.expression, context), 0x1a);
           break;
         case "return":
@@ -1550,6 +1941,43 @@ function emitModule(program, options = {}) {
     return code;
   };
 
+  const emitPackedDecoder = (name) => {
+    const storage = arrayStorageByName.get(name);
+    const packing = storage?.packing;
+    if (!storage || !packing || storage.offset === null) {
+      throw new Error(`internal error: packed decoder has no materialized storage for ${JSON.stringify(name)}`);
+    }
+    const paletteOffset = storage.offset + packing.dataBytes.length;
+    const paletteAlignment = paletteOffset % 4 === 0 ? 0x02 : 0x00;
+    const localGet = (index) => [0x20, ...u32(index)];
+    const localSet = (index) => [0x21, ...u32(index)];
+    const i32Const = (value) => [0x41, ...s32(value)];
+
+    // Parameters and locals are all f32/i32 values at the WASM boundary.  The
+    // source-side checked index is converted once here, then split into the
+    // seven-byte triangle record address and its logical lane.  The branch
+    // keeps coordinate decoding signed while RGB lanes use the palette index
+    // stored in the final record byte.
+    const code = [
+      ...localGet(0), 0xa8, ...localSet(1),
+      ...localGet(1), ...i32Const(9), 0x6e, ...i32Const(7), 0x6c,
+      ...i32Const(storage.offset), 0x6a, ...localSet(2),
+      ...localGet(1), ...i32Const(9), 0x70, ...localSet(3),
+      ...localGet(3), ...i32Const(6), 0x49,
+      0x04, F32,
+      ...localGet(2), ...localGet(3), 0x6a, 0x2c, 0x00, 0x00, 0xb2,
+      0x05,
+      ...localGet(2), ...i32Const(6), 0x6a, 0x2d, 0x00, 0x00, ...localSet(4),
+      ...localGet(4), ...i32Const(12), 0x6c, ...i32Const(paletteOffset), 0x6a,
+      ...localGet(3), ...i32Const(6), 0x6b, ...i32Const(4), 0x6c, 0x6a,
+      0x2a, paletteAlignment, 0x00,
+      0x0b,
+      0x0b,
+    ];
+    const locals = [1, 4, 0x7f];
+    return [...locals, ...code];
+  };
+
   const codeBodies = [];
   for (const fn of reachability.reachable) {
     const context = contextFor(fn);
@@ -1558,6 +1986,10 @@ function emitModule(program, options = {}) {
     const localCount = context.layout.localCount - fn.params.length;
     const locals = localCount === 0 ? [0] : [1, ...u32(localCount), F32];
     const body = [...locals, ...code];
+    codeBodies.push(...u32(body.length), ...body);
+  }
+  for (const name of packedDecoderNames) {
+    const body = emitPackedDecoder(name);
     codeBodies.push(...u32(body.length), ...body);
   }
 
@@ -1574,10 +2006,15 @@ function emitModule(program, options = {}) {
     ...stringBytes("frame"), 0x00, ...u32(functionIndices.get("frame")),
     ...stringBytes("memory"), 0x02, 0,
   ];
-  const codePayload = [...u32(codeBodies.length > 0 ? reachability.reachable.length : 0), ...codeBodies];
+  const codePayload = [...u32(codeBodies.length > 0 ? reachability.reachable.length + packedDecoderNames.length : 0), ...codeBodies];
   const dataBytes = [
     ...(globalStorage === "memory" ? globals.flatMap((global) => f32Bytes(global.value)) : []),
-    ...arrayStorage.flatMap((item) => item.materialized ? item.declaration.values.flatMap((value) => f32Bytes(value)) : []),
+    ...arrayStorage.flatMap((item) => {
+      if (!item.materialized) return [];
+      if (item.packing) return [...item.packing.dataBytes, ...item.packing.paletteBytes];
+      if (item.encoding !== "f32") return integerArrayDataBytes(item.declaration.values, item.encoding);
+      return item.declaration.values.flatMap((value) => f32Bytes(value));
+    }),
   ];
 
   const bytes = [
@@ -1586,7 +2023,7 @@ function emitModule(program, options = {}) {
     ...section(1, typePayload),
     ...(importedNames.length ? section(2, importPayload) : []),
     ...section(3, [
-      ...u32(reachability.reachable.length),
+      ...u32(reachability.reachable.length + packedDecoderNames.length),
       ...functionSection,
     ]),
     ...section(5, memoryPayload),
@@ -1601,16 +2038,31 @@ function emitModule(program, options = {}) {
     ]) : []),
   ];
 
-  const arrayLayout = arrayStorage.map((item) => ({
-    name: item.declaration.name,
-    mutable: item.declaration.mutable,
-    length: item.declaration.length,
-    offset: item.offset,
-    byteOffset: item.offset,
-    byteLength: item.declaration.byteLength,
-    materialized: item.materialized,
-    values: item.declaration.values.slice(),
-  }));
+  const arrayLayout = arrayStorage.map((item) => {
+    const layout = {
+      name: item.declaration.name,
+      mutable: item.declaration.mutable,
+      length: item.declaration.length,
+      offset: item.offset,
+      byteOffset: item.offset,
+      byteLength: item.physicalByteLength,
+      materialized: item.materialized,
+      values: item.declaration.values.slice(),
+    };
+    if (item.packing) {
+      layout.encoding = item.packing.encoding;
+      layout.triangleCount = item.packing.triangleCount;
+      layout.paletteSize = item.packing.paletteSize;
+      if (item.materialized) {
+        layout.paletteOffset = item.offset + item.packing.dataBytes.length;
+      }
+    } else if (item.encoding !== "f32") {
+      layout.encoding = item.encoding;
+      layout.elementBytes = item.elementBytes;
+      layout.physicalByteLength = item.physicalByteLength;
+    }
+    return layout;
+  });
 
   return {
     wasm: Uint8Array.from(bytes),
@@ -1618,6 +2070,9 @@ function emitModule(program, options = {}) {
     functions: reachability.reachable.map((fn) => fn.name),
     globals: globals.map((global) => global.name),
     globalStorage,
+    integerArrayStorage,
+    svgMetadata,
+    svgTriCallSites: svgTriCallSites.descriptors,
     arrays: arrayLayout,
     arrayLayout,
     memoryPages,
@@ -1657,7 +2112,9 @@ export function compileDetailed(source, options = {}) {
     throw new TypeError("Slim compile error: options must be an object");
   }
   const optionNames = Object.keys(options);
-  const unsupported = optionNames.find((name) => name !== "globalStorage");
+  const unsupported = optionNames.find((name) => (
+    name !== "globalStorage" && name !== "packedTriangleArrays" && name !== "integerArrayStorage" && name !== "svgMetadata"
+  ));
   if (unsupported) {
     throw new TypeError(`Slim compile error: unsupported option ${JSON.stringify(unsupported)}`);
   }
@@ -1665,8 +2122,39 @@ export function compileDetailed(source, options = {}) {
   if (globalStorage !== "globals" && globalStorage !== "memory") {
     throw new TypeError(`Slim compile error: globalStorage must be "globals" or "memory", got ${JSON.stringify(globalStorage)}`);
   }
+  const integerArrayStorage = options.integerArrayStorage === undefined
+    ? "f32"
+    : options.integerArrayStorage;
+  if (integerArrayStorage !== "f32" && integerArrayStorage !== "compact") {
+    throw new TypeError(`Slim compile error: integerArrayStorage must be "f32" or "compact", got ${JSON.stringify(integerArrayStorage)}`);
+  }
+  const svgMetadata = options.svgMetadata ?? false;
+  if (typeof svgMetadata !== "boolean") {
+    throw new TypeError(`Slim compile error: svgMetadata must be true or false, got ${JSON.stringify(svgMetadata)}`);
+  }
+  const packedTriangleArrays = options.packedTriangleArrays === undefined
+    ? []
+    : options.packedTriangleArrays;
+  if (!Array.isArray(packedTriangleArrays)) {
+    throw new TypeError("Slim compile error: packedTriangleArrays must be an array of array names");
+  }
+  const packedNames = new Set();
+  for (const name of packedTriangleArrays) {
+    if (typeof name !== "string") {
+      throw new TypeError("Slim compile error: packedTriangleArrays entries must be strings");
+    }
+    if (packedNames.has(name)) {
+      throw new TypeError(`Slim compile error: duplicate packed triangle array ${JSON.stringify(name)}`);
+    }
+    packedNames.add(name);
+  }
   const program = parseProgram(source);
-  return emitModule(program, {globalStorage});
+  return emitModule(program, {
+    globalStorage,
+    integerArrayStorage,
+    packedTriangleArrays: [...packedNames],
+    svgMetadata,
+  });
 }
 
 export default compile;

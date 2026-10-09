@@ -1,6 +1,8 @@
-import {compileDetailed, parseProgram} from "./compiler.mjs";
+import {compileDetailed, parseProgram, INTRINSICS, MATH_IMPORTS} from "./compiler.mjs";
 
-const BUILTIN_NAMES = new Set(["tri", "sound", "input"]);
+const SVG_METADATA_BUILTIN = "svg_group";
+const SVG_TRI_BUILTIN = "svg_tri";
+const BUILTIN_NAMES = new Set(["tri", "sound", "input", "text", SVG_METADATA_BUILTIN, SVG_TRI_BUILTIN]);
 
 function safeName(name) {
   return name.replace(/[^A-Za-z0-9_$]/g, "_");
@@ -110,9 +112,13 @@ function f32Literal(value) {
   return shortest;
 }
 
-function emitJavaScript(program, detailed, precision) {
+function emitJavaScript(program, detailed, precision, svgMetadata) {
   const useF32 = precision === "f32";
   const functionsByName = program.functions;
+  const svgTriCallSites = new Map((detailed.svgTriCallSites ?? []).map((site) => [
+    `${site.function}:${site.line}:${site.column}`,
+    site.id,
+  ]));
   const globalsByName = new Map(program.globals.map((global, index) => [global.name, `g_${safeName(global.name)}_${index}`]));
   const reachableNames = detailed.functions;
   const reachableFunctions = reachableNames.map((name) => {
@@ -219,9 +225,20 @@ function emitJavaScript(program, detailed, precision) {
           return `${target}[${index}]`;
         }
         case "call": {
+          if ((node.name === SVG_METADATA_BUILTIN || node.name === SVG_TRI_BUILTIN) && !svgMetadata) return round("0");
           const args = node.args.map((argument) => emit(argument)).join(", ");
+          if (node.name === "tri" && svgMetadata) {
+            const key = `${context.fn?.name ?? "<global>"}:${node.token?.line ?? 0}:${node.token?.column ?? 0}`;
+            const callSiteId = svgTriCallSites.get(key);
+            if (callSiteId === undefined) backendError("internal error: missing SVG triangle call-site identity", node);
+            return `e.${SVG_TRI_BUILTIN}(${callSiteId}, ${args})`;
+          }
           let call;
-          if (BUILTIN_NAMES.has(node.name)) {
+          if (Object.hasOwn(INTRINSICS, node.name)) {
+            call = `${INTRINSICS[node.name].js}(${args})`;
+          } else if (Object.hasOwn(MATH_IMPORTS, node.name)) {
+            call = `Math.${node.name}(${args})`;
+          } else if (BUILTIN_NAMES.has(node.name)) {
             call = `e.${node.name}(${args})`;
           } else {
             const target = functionNames.get(node.name);
@@ -286,6 +303,9 @@ function emitJavaScript(program, detailed, precision) {
   const emitStatements = (statements, context, indent) => {
     const lines = [];
     const line = (text) => lines.push(`${indent}${text}`);
+    const isStrippedSvgMetadata = (expression) => !svgMetadata
+      && expression.kind === "call"
+      && (expression.name === SVG_METADATA_BUILTIN || expression.name === SVG_TRI_BUILTIN);
     for (const statement of statements) {
       switch (statement.kind) {
         case "let": {
@@ -317,6 +337,7 @@ function emitJavaScript(program, detailed, precision) {
           break;
         }
         case "expr":
+          if (isStrippedSvgMetadata(statement.expression)) break;
           line(`${emitExpression(statement.expression, context)};`);
           break;
         case "return":
@@ -365,6 +386,16 @@ function emitJavaScript(program, detailed, precision) {
     );
   }
 
+  const arrayHelperCalls = materializedArrays.filter((array) => {
+    const values = array.values ?? [];
+    const isRepeat = array.repeatCount !== null && array.repeatCount !== undefined
+      || Boolean(array.initializer?.repeat);
+    return !isRepeat || f32Literal(values[0] ?? 0) === "0";
+  }).length;
+  // Amortize the helper across several allocations so small games stay lean.
+  const useArrayHelper = arrayHelperCalls > 2;
+  if (useArrayHelper) lines.push("  const makeArray = (values) => new Float32Array(values);");
+
   const globalContext = {
     layout: { locals: new Map(), moduloTemps: new Map() },
   };
@@ -377,9 +408,18 @@ function emitJavaScript(program, detailed, precision) {
     const isRepeat = array.repeatCount !== null && array.repeatCount !== undefined
       || Boolean(array.initializer?.repeat);
     if (isRepeat) {
-      lines.push(`  const ${target} = new Float32Array(${array.length}).fill(${f32Literal(values[0] ?? 0)});`);
+      const initialValue = f32Literal(values[0] ?? 0);
+      if (initialValue === "0") {
+        const allocation = useArrayHelper
+          ? `makeArray(${array.length})`
+          : `new Float32Array(${array.length})`;
+        lines.push(`  const ${target} = ${allocation};`);
+      } else {
+        lines.push(`  const ${target} = new Float32Array(${array.length}).fill(${initialValue});`);
+      }
     } else {
-      lines.push(`  const ${target} = new Float32Array([${values.map(f32Literal).join(", ")}]);`);
+      const literal = `[${values.map(f32Literal).join(", ")}]`;
+      lines.push(`  const ${target} = ${useArrayHelper ? "makeArray" : "new Float32Array"}(${literal});`);
     }
   }
 
@@ -418,12 +458,17 @@ export function compileJavaScript(source, options = {}) {
   if (precision !== "native" && precision !== "f32") {
     throw new TypeError(`Slim JavaScript compile error: unsupported precision ${JSON.stringify(precision)}`);
   }
-  const detailed = compileDetailed(source);
+  const svgMetadata = options?.svgMetadata ?? false;
+  if (typeof svgMetadata !== "boolean") {
+    throw new TypeError(`Slim JavaScript compile error: svgMetadata must be true or false, got ${JSON.stringify(svgMetadata)}`);
+  }
+  const detailed = compileDetailed(source, {svgMetadata});
   const program = parseProgram(source);
   return {
-    code: emitJavaScript(program, detailed, precision),
+    code: emitJavaScript(program, detailed, precision, svgMetadata),
     imports: detailed.imports.slice(),
     precision,
+    svgMetadata,
   };
 }
 

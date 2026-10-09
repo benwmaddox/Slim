@@ -3,6 +3,11 @@
 This implementation follows the measured array and WASM studies. Production
 features should remain small and support both JS and WASM.
 
+The measurements below record the first array/content checkpoint with an
+unpacked atlas. See [PACKED_TRIANGLES.md](PACKED_TRIANGLES.md) for the subsequent
+WASM atlas experiment and [INTEGER_ARRAYS.md](INTEGER_ARRAYS.md) for the
+subsequent exact integer storage, level-data experiments, and current release sizes.
+
 ## Scope and ownership
 
 - Compiler: fixed one-dimensional top-level f32 arrays, literal/repeat initializers,
