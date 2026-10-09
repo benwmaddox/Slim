@@ -21,6 +21,13 @@ static HBITMAP slim_surface_previous;
 static slim_u32 *slim_surface_pixels;
 static int slim_surface_width;
 static int slim_surface_height;
+#if SLIM_HAS_TEXT
+static HDC slim_text_active_dc;
+#endif
+
+#if SLIM_GPU_RENDERER
+#include "windows-gpu.h"
+#endif
 
 static void slim_zero_pixels(slim_u32 *pixels, SIZE_T count) {
   SIZE_T i;
@@ -28,13 +35,149 @@ static void slim_zero_pixels(slim_u32 *pixels, SIZE_T count) {
 }
 #if SLIM_HAS_TEXT
 #define SLIM_TEXT_COMMANDS 64
+#define SLIM_FONT_CACHE_ENTRIES 32
 typedef struct SlimTextCommand {
   uint32_t id;
   float x, y, size;
   int tone;
 } SlimTextCommand;
+typedef struct SlimCachedFont {
+  int pixel_size;
+  uint32_t last_used;
+  HFONT font;
+} SlimCachedFont;
+typedef struct SlimWideText {
+  wchar_t *text;
+  int length;
+} SlimWideText;
 static SlimTextCommand slim_text_commands[SLIM_TEXT_COMMANDS];
 static uint32_t slim_text_command_count;
+static SlimCachedFont slim_font_cache[SLIM_FONT_CACHE_ENTRIES];
+static uint32_t slim_font_cache_clock;
+static SlimWideText *slim_wide_text_cache;
+static uint32_t slim_wide_text_cache_count;
+
+static int slim_unselect_cached_font(HFONT font) {
+  HDC dc = slim_text_active_dc ? slim_text_active_dc : slim_surface_dc;
+  HGDIOBJ current, stock, previous;
+  if (!dc) return 1;
+  current = GetCurrentObject(dc, OBJ_FONT);
+  if (current != (HGDIOBJ)font) return 1;
+  stock = GetStockObject(SYSTEM_FONT);
+  if (!stock) return 0;
+  GdiFlush();
+  previous = SelectObject(dc, stock);
+  if (!previous || previous == (HGDIOBJ)HGDI_ERROR) return 0;
+  return GetCurrentObject(dc, OBJ_FONT) != (HGDIOBJ)font;
+}
+
+static void slim_clear_font_cache(void) {
+  uint32_t i;
+  if (slim_text_active_dc || slim_surface_dc) GdiFlush();
+  for (i = 0; i < SLIM_FONT_CACHE_ENTRIES; ++i) {
+    HFONT font = slim_font_cache[i].font;
+    if (!font) continue;
+    if (!slim_unselect_cached_font(font)) continue;
+    if (DeleteObject(font)) {
+      slim_font_cache[i].font = 0;
+      slim_font_cache[i].pixel_size = 0;
+      slim_font_cache[i].last_used = 0;
+    }
+  }
+  slim_font_cache_clock = 0;
+}
+
+static void slim_clear_wide_text_cache(void) {
+  uint32_t i;
+  HANDLE heap = GetProcessHeap();
+  for (i = 0; i < slim_wide_text_cache_count; ++i) {
+    if (slim_wide_text_cache[i].text) HeapFree(heap, 0, slim_wide_text_cache[i].text);
+  }
+  if (slim_wide_text_cache) HeapFree(heap, 0, slim_wide_text_cache);
+  slim_wide_text_cache = 0;
+  slim_wide_text_cache_count = 0;
+}
+
+static int slim_ensure_wide_text_cache(void) {
+  SIZE_T bytes;
+  if (slim_wide_text_cache && slim_wide_text_cache_count == slim_text_count) return 1;
+  slim_clear_wide_text_cache();
+  if (!slim_text_count) return 1;
+  if ((SIZE_T)slim_text_count > ((SIZE_T)-1) / sizeof(SlimWideText)) return 0;
+  bytes = (SIZE_T)slim_text_count * sizeof(SlimWideText);
+  slim_wide_text_cache = (SlimWideText *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytes);
+  if (!slim_wide_text_cache) return 0;
+  slim_wide_text_cache_count = slim_text_count;
+  return 1;
+}
+
+static const wchar_t *slim_cached_wide_text(uint32_t id, int *length) {
+  SlimWideText *entry;
+  const char *utf8;
+  wchar_t *wide;
+  int required, converted;
+  SIZE_T bytes;
+  if (id >= slim_text_count || !slim_ensure_wide_text_cache()) return 0;
+  entry = slim_wide_text_cache + id;
+  if (!entry->text) {
+    utf8 = slim_texts[id];
+    if (!utf8) return 0;
+    required = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, 0, 0);
+    if (required <= 0 || (SIZE_T)required > ((SIZE_T)-1) / sizeof(wchar_t)) return 0;
+    bytes = (SIZE_T)required * sizeof(wchar_t);
+    wide = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, bytes);
+    if (!wide) return 0;
+    converted = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, required);
+    if (converted != required) {
+      HeapFree(GetProcessHeap(), 0, wide);
+      return 0;
+    }
+    entry->text = wide;
+    entry->length = required - 1;
+  }
+  *length = entry->length;
+  return entry->text;
+}
+
+static HFONT slim_cached_font(int pixel_size) {
+  uint32_t i, empty_slot = SLIM_FONT_CACHE_ENTRIES;
+  uint32_t oldest_slot = SLIM_FONT_CACHE_ENTRIES;
+  uint32_t oldest = UINT32_MAX;
+  uint32_t slot;
+  HFONT font;
+  if (++slim_font_cache_clock == 0) {
+    slim_font_cache_clock = 1;
+    for (i = 0; i < SLIM_FONT_CACHE_ENTRIES; ++i) slim_font_cache[i].last_used = 0;
+  }
+  for (i = 0; i < SLIM_FONT_CACHE_ENTRIES; ++i) {
+    if (slim_font_cache[i].font && slim_font_cache[i].pixel_size == pixel_size) {
+      slim_font_cache[i].last_used = slim_font_cache_clock;
+      return slim_font_cache[i].font;
+    }
+    if (!slim_font_cache[i].font) {
+      if (empty_slot == SLIM_FONT_CACHE_ENTRIES) empty_slot = i;
+    } else if (slim_font_cache[i].last_used < oldest) {
+      oldest = slim_font_cache[i].last_used;
+      oldest_slot = i;
+    }
+  }
+  slot = empty_slot != SLIM_FONT_CACHE_ENTRIES ? empty_slot : oldest_slot;
+  if (slot == SLIM_FONT_CACHE_ENTRIES) return 0;
+  if (slim_font_cache[slot].font) {
+    HFONT old_font = slim_font_cache[slot].font;
+    if (!slim_unselect_cached_font(old_font)) return 0;
+    if (!DeleteObject(old_font)) return 0;
+    slim_font_cache[slot].font = 0;
+  }
+  font = CreateFontW(-pixel_size, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                     ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+  if (!font) return 0;
+  slim_font_cache[slot].font = font;
+  slim_font_cache[slot].pixel_size = pixel_size;
+  slim_font_cache[slot].last_used = slim_font_cache_clock;
+  return font;
+}
 
 float slim_text(float id_value, float x, float y, float size, float tone) {
   uint32_t id;
@@ -65,44 +208,40 @@ static void slim_draw_text(HDC dc, int left, int top, int width, int height) {
   uint32_t i;
   int old_background, old_alignment;
   COLORREF old_color;
-  HFONT font = 0;
-  HGDIOBJ original_font = 0;
-  int font_pixels = -1;
+  HGDIOBJ original_font = GetCurrentObject(dc, OBJ_FONT);
+  HFONT selected_font = 0;
+  int selected_pixel_size = -1;
+  slim_text_active_dc = dc;
+  if (!original_font) original_font = GetStockObject(SYSTEM_FONT);
   old_background = SetBkMode(dc, TRANSPARENT);
   old_alignment = SetTextAlign(dc, TA_CENTER | TA_BASELINE);
   old_color = SetTextColor(dc, RGB(8,10,22));
   for (i = 0; i < slim_text_command_count; ++i) {
     SlimTextCommand *command = slim_text_commands + i;
-    const char *text = slim_texts[command->id];
-    wchar_t wide_text[512];
-    int wide_count, pixel_size, outline, px, py, offset;
+    const wchar_t *wide_text;
+    HFONT font;
+    HGDIOBJ previous_font;
+    int text_length, pixel_size, outline, px, py, offset;
     float scaled_size;
-    if (!text) continue;
+    wide_text = slim_cached_wide_text(command->id, &text_length);
+    if (!wide_text || text_length <= 0) continue;
     scaled_size = command->size * (float)height / 600.0f;
     if (!slim_is_finite(scaled_size) || scaled_size <= 0.0f || scaled_size > 4096.0f) continue;
     pixel_size = (int)(scaled_size + 0.5f);
     if (pixel_size < 1) pixel_size = 1;
-    if (pixel_size != font_pixels) {
-      HFONT next_font;
-      if (font) {
-        SelectObject(dc, original_font);
-        DeleteObject(font);
-        font = 0;
-        original_font = 0;
-      }
-      next_font = CreateFontW(-pixel_size, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                              ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-      if (next_font) {
-        font = next_font;
-        original_font = SelectObject(dc, font);
-        font_pixels = pixel_size;
-      } else font_pixels = -1;
+    if (selected_font && selected_pixel_size != pixel_size) {
+      SelectObject(dc, original_font);
+      selected_font = 0;
+      selected_pixel_size = -1;
     }
-    if (!font) continue;
-    wide_count = MultiByteToWideChar(CP_UTF8, 0, text, -1, wide_text,
-                                     (int)(sizeof(wide_text) / sizeof(wide_text[0])));
-    if (wide_count <= 1) continue;
+    if (!selected_font) {
+      font = slim_cached_font(pixel_size);
+      if (!font) continue;
+      previous_font = SelectObject(dc, font);
+      if (!previous_font || previous_font == (HGDIOBJ)HGDI_ERROR) continue;
+      selected_font = font;
+      selected_pixel_size = pixel_size;
+    }
     px = left + (int)(command->x * (float)width / 800.0f);
     py = top + (int)(command->y * (float)height / 600.0f);
     outline = pixel_size / 10;
@@ -110,22 +249,45 @@ static void slim_draw_text(HDC dc, int left, int top, int width, int height) {
     SetTextColor(dc, RGB(8,10,22));
     for (offset = 0; offset < 8; ++offset) {
       TextOutW(dc, px + outline_offsets[offset][0] * outline,
-               py + outline_offsets[offset][1] * outline, wide_text, wide_count - 1);
+               py + outline_offsets[offset][1] * outline, wide_text, text_length);
     }
     SetTextColor(dc, tones[command->tone]);
-    TextOutW(dc, px, py, wide_text, wide_count - 1);
+    TextOutW(dc, px, py, wide_text, text_length);
   }
-  if (font) {
-    SelectObject(dc, original_font);
-    DeleteObject(font);
-  }
+  if (selected_font) SelectObject(dc, original_font);
   SetTextColor(dc, old_color);
   SetTextAlign(dc, old_alignment);
   SetBkMode(dc, old_background);
+  slim_text_active_dc = 0;
 }
 #endif
 
+static void slim_clear_letterbox_bars(HDC dc, int client_width, int client_height,
+                                      int left, int top, int width, int height) {
+  int right = left + width;
+  int bottom = top + height;
+  if (top > 0) PatBlt(dc, 0, 0, client_width, top, BLACKNESS);
+  if (bottom < client_height) PatBlt(dc, 0, bottom, client_width, client_height - bottom, BLACKNESS);
+  if (left > 0) PatBlt(dc, 0, top, left, height, BLACKNESS);
+  if (right < client_width) PatBlt(dc, right, top, client_width - right, height, BLACKNESS);
+}
+
 static int slim_resize_framebuffer(HWND window) {
+#if SLIM_GPU_RENDERER
+  RECT client;
+  int width, height;
+  if (!slim_gpu_initialized) return 1;
+  if (!window || !GetClientRect(window, &client)) return 0;
+  width = client.right - client.left;
+  height = client.bottom - client.top;
+  if (width <= 0 || height <= 0) return 0;
+  if (width != slim_surface_width || height != slim_surface_height) {
+#if SLIM_HAS_TEXT
+    slim_clear_font_cache();
+#endif
+  }
+  return slim_gpu_prepare_framebuffer(window);
+#else
   RECT client;
   BITMAPINFO info;
   HDC next_dc;
@@ -141,6 +303,9 @@ static int slim_resize_framebuffer(HWND window) {
   if (slim_surface_dc && slim_surface_width == client_width &&
       slim_surface_height == client_height && slim_fb_width == width &&
       slim_fb_height == height) return 1;
+#if SLIM_HAS_TEXT
+  slim_clear_font_cache();
+#endif
   next_dc = CreateCompatibleDC(0);
   if (!next_dc) return 0;
   info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -176,9 +341,14 @@ static int slim_resize_framebuffer(HWND window) {
     GdiFlush();
     StretchBlt(next_dc, 0, 0, client_width, client_height,
                slim_surface_dc, 0, 0, slim_surface_width, slim_surface_height, SRCCOPY);
+    slim_clear_letterbox_bars(next_dc, client_width, client_height, left, top, width, height);
     SelectObject(slim_surface_dc, slim_surface_previous);
     DeleteObject(slim_surface_bitmap);
     DeleteDC(slim_surface_dc);
+    slim_surface_dc = 0;
+#if SLIM_HAS_TEXT
+    slim_clear_font_cache();
+#endif
   }
   slim_surface_dc = next_dc;
   slim_surface_bitmap = next_bitmap;
@@ -189,6 +359,7 @@ static int slim_resize_framebuffer(HWND window) {
   slim_bind_framebuffer(next_pixels + top * client_width + left,
                         width, height, client_width);
   return 1;
+#endif
 }
 
 static int slim_prepare_framebuffer(HWND window) {
@@ -293,23 +464,40 @@ static void slim_blit_surface(HDC dc) {
 }
 
 static void slim_present(void) {
+#if SLIM_GPU_RENDERER
+  if (slim_gpu_present() == DXGI_STATUS_OCCLUDED) return;
+#else
   HDC dc;
   if (!slim_window) return;
   dc = GetDC(slim_window);
   if (!dc) return;
   slim_blit_surface(dc);
   ReleaseDC(slim_window, dc);
+#endif
 }
 
 #if SLIM_HAS_TEXT
 static void slim_compose_text(void) {
   int left, top, width, height;
+#if SLIM_GPU_RENDERER
+  HDC dc;
+  if (!slim_text_command_count) return;
+  dc = slim_gpu_get_surface_dc();
+  if (!dc) return;
+  slim_fit_viewport(slim_surface_width, slim_surface_height,
+                    &left, &top, &width, &height);
+  if (width == slim_fb_width && height == slim_fb_height) {
+    slim_draw_text(dc, left, top, width, height);
+  }
+  slim_gpu_release_surface_dc();
+#else
   if (!slim_surface_dc) return;
   slim_fit_viewport(slim_surface_width, slim_surface_height,
                     &left, &top, &width, &height);
   if (width == slim_fb_width && height == slim_fb_height) {
     slim_draw_text(slim_surface_dc, left, top, width, height);
   }
+#endif
 }
 #endif
 
@@ -327,6 +515,11 @@ static LRESULT CALLBACK slim_window_proc(HWND window, UINT message, WPARAM wpara
     case WM_SIZE:
       slim_prepare_framebuffer(window);
       return 0;
+    case WM_DPICHANGED:
+#if SLIM_HAS_TEXT
+      slim_clear_font_cache();
+#endif
+      return DefWindowProcW(window, message, wparam, lparam);
     case WM_KEYDOWN:
       slim_key_event(wparam, lparam, 1);
       return 0;
@@ -359,7 +552,11 @@ static LRESULT CALLBACK slim_window_proc(HWND window, UINT message, WPARAM wpara
     case WM_PAINT: {
       PAINTSTRUCT paint;
       HDC dc = BeginPaint(window, &paint);
+#if !SLIM_GPU_RENDERER
       slim_blit_surface(dc);
+#else
+      (void)dc;
+#endif
       EndPaint(window, &paint);
       return 0;
     }
@@ -563,6 +760,15 @@ typedef struct SlimBenchmarkResult {
   uint32_t dpi_awareness;
 } SlimBenchmarkResult;
 
+typedef struct SlimResourceCheck {
+  uint32_t before;
+  uint32_t min_800;
+  uint32_t max_800;
+  uint32_t min_1280;
+  uint32_t max_1280;
+  uint32_t after_cleanup;
+} SlimResourceCheck;
+
 static int slim_benchmark_requested(void) {
   const char *command = GetCommandLineA();
   while (*command) {
@@ -649,6 +855,15 @@ static void slim_write_offscreen_benchmark(const SlimBenchmarkResult *result) {
   CloseHandle(file);
 }
 
+static void slim_write_resource_check(const SlimResourceCheck *result) {
+  HANDLE file = CreateFileA("slim-resource-check.bin", GENERIC_WRITE, 0, 0,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+  DWORD written;
+  if (file == INVALID_HANDLE_VALUE) return;
+  WriteFile(file, result, sizeof(*result), &written, 0);
+  CloseHandle(file);
+}
+
 static int slim_write_composed_bmp(void) {
   HANDLE file;
   DWORD written;
@@ -695,6 +910,215 @@ static int slim_write_composed_bmp(void) {
   return 1;
 }
 
+#if SLIM_GPU_RENDERER
+static LRESULT CALLBACK slim_gpu_smoke_window_proc(HWND window, UINT message,
+                                                    WPARAM wparam, LPARAM lparam) {
+  if (message == WM_ERASEBKGND) return 1;
+  if (message == WM_PAINT) {
+    PAINTSTRUCT paint;
+    BeginPaint(window, &paint);
+    EndPaint(window, &paint);
+    return 0;
+  }
+  return DefWindowProcW(window, message, wparam, lparam);
+}
+
+static HWND slim_gpu_create_smoke_window(int width, int height) {
+  WNDCLASSEXW wc;
+  HINSTANCE instance = GetModuleHandleW(0);
+  ATOM registered;
+  slim_gpu_zero(&wc, sizeof(wc));
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = slim_gpu_smoke_window_proc;
+  wc.hInstance = instance;
+  wc.lpszClassName = L"SLIMGpuSmokeWindow";
+  registered = RegisterClassExW(&wc);
+  if (!registered && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return 0;
+  return CreateWindowExW(0, wc.lpszClassName, L"", WS_POPUP,
+                         0, 0, width, height, 0, 0, instance, 0);
+}
+
+static int slim_gpu_write_readback_bmp(const char *path) {
+  D3D11_TEXTURE2D_DESC source_desc, staging_desc;
+  ID3D11Texture2D *staging = 0;
+  D3D11_MAPPED_SUBRESOURCE mapped;
+  SlimBmpFileHeader file_header;
+  SlimBmpInfoHeader info;
+  HANDLE file = INVALID_HANDLE_VALUE;
+  UINT width, height;
+  uint32_t image_size;
+  DWORD written;
+  int y, ok = 0;
+  HRESULT hr;
+  if (!slim_gpu_initialized || !slim_gpu_backbuffer || !slim_gpu_context) return 0;
+  ID3D11Texture2D_GetDesc(slim_gpu_backbuffer, &source_desc);
+  width = source_desc.Width;
+  height = source_desc.Height;
+  if (!width || !height || (uint64_t)width * (uint64_t)height > 0x3fffffffu) return 0;
+  staging_desc = source_desc;
+  staging_desc.Usage = D3D11_USAGE_STAGING;
+  staging_desc.BindFlags = 0;
+  staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  staging_desc.MiscFlags = 0;
+  hr = ID3D11Device_CreateTexture2D(slim_gpu_device, &staging_desc, 0, &staging);
+  if (FAILED(hr)) goto done;
+  ID3D11DeviceContext_CopyResource(slim_gpu_context,
+                                  (ID3D11Resource *)staging,
+                                  (ID3D11Resource *)slim_gpu_backbuffer);
+  ID3D11DeviceContext_Flush(slim_gpu_context);
+  hr = ID3D11DeviceContext_Map(slim_gpu_context, (ID3D11Resource *)staging,
+                               0, D3D11_MAP_READ, 0, &mapped);
+  if (FAILED(hr)) goto done;
+  image_size = width * height * (uint32_t)sizeof(slim_u32);
+  file = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, 0,
+                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+  if (file == INVALID_HANDLE_VALUE) goto unmap;
+  file_header.type = 0x4d42;
+  file_header.size = (uint32_t)(sizeof(file_header) + sizeof(info) + image_size);
+  file_header.reserved1 = 0;
+  file_header.reserved2 = 0;
+  file_header.offset = (uint32_t)(sizeof(file_header) + sizeof(info));
+  info.size = sizeof(info);
+  info.width = (int32_t)width;
+  info.height = (int32_t)height;
+  info.planes = 1;
+  info.bits = 32;
+  info.compression = BI_RGB;
+  info.image_size = image_size;
+  info.x_pixels_per_meter = 0;
+  info.y_pixels_per_meter = 0;
+  info.colors_used = 0;
+  info.important_colors = 0;
+  if (!WriteFile(file, &file_header, sizeof(file_header), &written, 0) ||
+      written != sizeof(file_header) ||
+      !WriteFile(file, &info, sizeof(info), &written, 0) || written != sizeof(info)) goto close_file;
+  for (y = (int)height - 1; y >= 0; --y) {
+    const BYTE *row = (const BYTE *)mapped.pData + (SIZE_T)y * (SIZE_T)mapped.RowPitch;
+    DWORD row_bytes = width * (DWORD)sizeof(slim_u32);
+    if (!WriteFile(file, row, row_bytes, &written, 0) || written != row_bytes) goto close_file;
+  }
+  ok = 1;
+close_file:
+  CloseHandle(file);
+unmap:
+  ID3D11DeviceContext_Unmap(slim_gpu_context, (ID3D11Resource *)staging, 0);
+done:
+  if (staging) ID3D11Texture2D_Release(staging);
+  if (!ok && FAILED(hr)) slim_gpu_last_error = hr;
+  return ok;
+}
+
+static int slim_gpu_run_hidden_frames(int width, int height, int frames,
+                                      int play, int resize_check,
+                                      int write_benchmark) {
+  LARGE_INTEGER frequency, start, end, work_start, work_end;
+  SlimBenchmarkResult result;
+  SlimResourceCheck resources;
+  uint32_t min_handles[2] = {UINT32_MAX, UINT32_MAX};
+  uint32_t max_handles[2] = {0, 0};
+  HWND window = 0;
+  int i, ok = 0;
+  uint64_t work_ticks = 0, presents = 0;
+  UINT32 handles;
+  resources.before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+  resources.min_800 = resources.max_800 = 0;
+  resources.min_1280 = resources.max_1280 = 0;
+  resources.after_cleanup = 0;
+  if (frames < 1) return 0;
+  window = slim_gpu_create_smoke_window(width, height);
+  if (!window) goto done;
+  slim_window = window;
+  if (!slim_gpu_initialize(window)) goto done;
+  if (play) slim_pressed = 1;
+  slim_init();
+  QueryPerformanceFrequency(&frequency);
+  QueryPerformanceCounter(&start);
+  for (i = 0; i < frames; ++i) {
+    if (resize_check && i > 0 && i % 50 == 0) {
+      RECT client;
+      int index;
+      width = width == 800 ? 1280 : 800;
+      height = width * 3 / 4;
+      SetWindowPos(window, 0, 0, 0, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+      if (!GetClientRect(window, &client) ||
+          !slim_gpu_resize_target((UINT)(client.right - client.left),
+                                 (UINT)(client.bottom - client.top))) goto done;
+#if SLIM_HAS_TEXT
+      slim_clear_font_cache();
+#endif
+    }
+    if (resize_check && i % 50 == 49) {
+      int index = width == 800 ? 0 : 1;
+      handles = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+      if (handles < min_handles[index]) min_handles[index] = handles;
+      if (handles > max_handles[index]) max_handles[index] = handles;
+    }
+#if SLIM_HAS_TEXT
+    slim_text_command_count = 0;
+#endif
+    QueryPerformanceCounter(&work_start);
+    slim_begin_frame();
+    slim_frame();
+    if (!slim_finish_frame()) goto done;
+#if SLIM_HAS_TEXT
+    slim_compose_text();
+#endif
+    QueryPerformanceCounter(&work_end);
+    work_ticks += (uint64_t)(work_end.QuadPart - work_start.QuadPart);
+    if (i == frames - 1) {
+      if (write_benchmark) {
+        if (!slim_gpu_write_readback_bmp("slim-composed.bmp")) goto done;
+      } else if (!slim_gpu_write_readback_bmp("slim-smoke.bmp")) goto done;
+      slim_gpu_write_info();
+    }
+    slim_gpu_present();
+    ++presents;
+    slim_pending_directions[0] = 0;
+    slim_pending_directions[1] = 0;
+    slim_pending_directions[2] = 0;
+    slim_pending_directions[3] = 0;
+    slim_pressed = 0;
+    slim_restart_pressed = 0;
+    slim_menu_pressed = 0;
+  }
+  QueryPerformanceCounter(&end);
+  if (write_benchmark) {
+    result.presents = presents;
+    result.ticks = (uint64_t)frames;
+    result.elapsed = (uint64_t)(end.QuadPart - start.QuadPart);
+    result.frequency = (uint64_t)frequency.QuadPart;
+    result.work = work_ticks;
+    result.framebuffer_width = (uint32_t)slim_fb_width;
+    result.framebuffer_height = (uint32_t)slim_fb_height;
+    result.client_width = (uint32_t)slim_surface_width;
+    result.client_height = (uint32_t)slim_surface_height;
+    result.window_dpi = 0;
+    result.dpi_awareness = 0;
+    slim_write_offscreen_benchmark(&result);
+    resources.min_800 = min_handles[0] == UINT32_MAX ? 0 : min_handles[0];
+    resources.max_800 = max_handles[0];
+    resources.min_1280 = min_handles[1] == UINT32_MAX ? 0 : min_handles[1];
+    resources.max_1280 = max_handles[1];
+  }
+  ok = 1;
+done:
+#if SLIM_HAS_TEXT
+  slim_clear_font_cache();
+  slim_clear_wide_text_cache();
+#endif
+  slim_gpu_release_all();
+  if (window) DestroyWindow(window);
+  slim_window = 0;
+  slim_gpu_window = 0;
+  slim_surface_width = 0;
+  slim_surface_height = 0;
+  slim_bind_framebuffer(0, 0, 0, 0);
+  resources.after_cleanup = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+  if (write_benchmark) slim_write_resource_check(&resources);
+  return ok;
+}
+#endif
+
 static int slim_command_has_option(const char *command, const char *option) {
   int option_length = 0;
   const char *p = option;
@@ -721,6 +1145,28 @@ static int slim_command_has_option(const char *command, const char *option) {
   return 0;
 }
 
+static void slim_release_offscreen_surface(void) {
+  if (slim_surface_dc) {
+    GdiFlush();
+#if SLIM_HAS_TEXT
+    slim_clear_font_cache();
+#endif
+    if (slim_surface_previous) SelectObject(slim_surface_dc, slim_surface_previous);
+    if (slim_surface_bitmap) DeleteObject(slim_surface_bitmap);
+    DeleteDC(slim_surface_dc);
+  }
+  slim_surface_dc = 0;
+  slim_surface_bitmap = 0;
+  slim_surface_previous = 0;
+  slim_surface_pixels = 0;
+  slim_surface_width = 0;
+  slim_surface_height = 0;
+  slim_bind_framebuffer(0, 0, 0, 0);
+#if SLIM_HAS_TEXT
+  slim_clear_font_cache();
+#endif
+}
+
 static int slim_create_offscreen_surface(int width, int height) {
   BITMAPINFO info;
   int left, top, view_width, view_height;
@@ -728,6 +1174,7 @@ static int slim_create_offscreen_surface(int width, int height) {
   slim_fit_viewport(width, height, &left, &top, &view_width, &view_height);
   if (!slim_framebuffer_size_valid(width, height) ||
       !slim_framebuffer_size_valid(view_width, view_height)) return 0;
+  if (slim_surface_dc) slim_release_offscreen_surface();
   slim_surface_dc = CreateCompatibleDC(0);
   if (!slim_surface_dc) return 0;
   info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -770,10 +1217,21 @@ static int slim_create_offscreen_surface(int width, int height) {
   return 1;
 }
 
-static int slim_run_offscreen_benchmark(int width, int height, int frames, int play) {
+static int slim_run_offscreen_benchmark(int width, int height, int frames, int play,
+                                       int resize_check) {
+#if SLIM_GPU_RENDERER
+  return slim_gpu_run_hidden_frames(width, height, frames, play, resize_check, 1);
+#else
   LARGE_INTEGER frequency, start, end;
   SlimBenchmarkResult result;
+  SlimResourceCheck resources;
+  uint32_t min_handles[2] = {UINT32_MAX, UINT32_MAX};
+  uint32_t max_handles[2] = {0, 0};
   int i;
+  resources.before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+  resources.min_800 = resources.max_800 = 0;
+  resources.min_1280 = resources.max_1280 = 0;
+  resources.after_cleanup = 0;
   if (frames < 1 || !slim_create_offscreen_surface(width, height)) return 0;
   slim_clear();
   slim_init();
@@ -781,12 +1239,18 @@ static int slim_run_offscreen_benchmark(int width, int height, int frames, int p
   QueryPerformanceFrequency(&frequency);
   QueryPerformanceCounter(&start);
   for (i = 0; i < frames; ++i) {
+    if (resize_check && i > 0 && i % 50 == 0) {
+      width = width == 800 ? 1280 : 800;
+      height = width * 3 / 4;
+      if (!slim_create_offscreen_surface(width, height)) return 0;
+    }
     GdiFlush();
 #if SLIM_HAS_TEXT
     slim_text_command_count = 0;
 #endif
-    slim_clear();
+    slim_begin_frame();
     slim_frame();
+    slim_finish_frame();
 #if SLIM_HAS_TEXT
     slim_compose_text();
 #endif
@@ -798,6 +1262,12 @@ static int slim_run_offscreen_benchmark(int width, int height, int frames, int p
       slim_pressed = 0;
       slim_restart_pressed = 0;
       slim_menu_pressed = 0;
+    }
+    if (resize_check && i % 50 == 49) {
+      uint32_t handles = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+      int index = width == 800 ? 0 : 1;
+      if (handles < min_handles[index]) min_handles[index] = handles;
+      if (handles > max_handles[index]) max_handles[index] = handles;
     }
   }
   QueryPerformanceCounter(&end);
@@ -814,31 +1284,46 @@ static int slim_run_offscreen_benchmark(int width, int height, int frames, int p
   result.dpi_awareness = 0;
   slim_write_offscreen_benchmark(&result);
   if (!slim_write_composed_bmp()) return 0;
-  GdiFlush();
-  SelectObject(slim_surface_dc, slim_surface_previous);
-  DeleteObject(slim_surface_bitmap);
-  DeleteDC(slim_surface_dc);
-  slim_surface_dc = 0;
-  slim_surface_bitmap = 0;
-  slim_surface_previous = 0;
-  slim_surface_pixels = 0;
-  slim_surface_width = 0;
-  slim_surface_height = 0;
-  slim_bind_framebuffer(0, 0, 0, 0);
+  slim_release_offscreen_surface();
+#if SLIM_HAS_TEXT
+  slim_clear_wide_text_cache();
+#endif
+  resources.after_cleanup = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+  if (resize_check) {
+    resources.min_800 = min_handles[0] == UINT32_MAX ? 0 : min_handles[0];
+    resources.max_800 = max_handles[0];
+    resources.min_1280 = min_handles[1] == UINT32_MAX ? 0 : min_handles[1];
+    resources.max_1280 = max_handles[1];
+  }
+  slim_write_resource_check(&resources);
   return 1;
+#endif
 }
 
 static int slim_run_smoke(void) {
   int i, count, smoke;
   slim_u32 *pixels;
   const char *command = GetCommandLineA();
+#if SLIM_GPU_RENDERER
+  /* A benchmark needs the real, visible HWND loop; let the entry point
+     continue into slim_run_window instead of consuming it as a hidden smoke. */
+  if (slim_benchmark_requested()) return 0;
+#endif
   count = slim_smoke_ticks(command, &smoke);
   if (!smoke) return 0;
+#if SLIM_GPU_RENDERER
+  if (!slim_command_has_option(command, "--offscreen")) {
+    int play = slim_command_has_option(command, "--play");
+    if (!slim_gpu_run_hidden_frames(800, 600, count, play, 0, 0)) ExitProcess(2);
+    ExitProcess(0);
+  }
+#endif
   if (slim_command_has_option(command, "--offscreen")) {
     int width = slim_command_has_option(command, "--large") ? 1280 : 800;
     int height = width * 3 / 4;
     int play = slim_command_has_option(command, "--play");
-    if (!slim_run_offscreen_benchmark(width, height, count, play)) ExitProcess(2);
+    int resize_check = slim_command_has_option(command, "--resize-check");
+    if (!slim_run_offscreen_benchmark(width, height, count, play, resize_check)) ExitProcess(2);
     ExitProcess(0);
   }
   pixels = (slim_u32 *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
@@ -851,8 +1336,9 @@ static int slim_run_smoke(void) {
 #if SLIM_HAS_TEXT
     slim_text_command_count = 0;
 #endif
-    slim_clear();
+    slim_begin_frame();
     slim_frame();
+    slim_finish_frame();
     slim_pressed = slim_restart_pressed = slim_menu_pressed = 0;
   }
   if (!slim_write_smoke_bmp()) ExitProcess(2);
@@ -902,6 +1388,10 @@ static int slim_run_window(void) {
   int game_benchmark = slim_game_benchmark_requested();
   uint64_t benchmark_presents = 0, benchmark_ticks = 0, benchmark_work = 0;
   LARGE_INTEGER benchmark_start, benchmark_work_start, benchmark_work_end;
+#if SLIM_GPU_RENDERER
+  LARGE_INTEGER benchmark_elapsed_end;
+  int benchmark_snapshot_written = 0;
+#endif
 #endif
   int timer_resolution_requested = 0;
   slim_set_dpi_awareness();
@@ -934,9 +1424,24 @@ static int slim_run_window(void) {
                            client.bottom - client.top, 0, 0, wc.hInstance, 0);
   if (!window) return 1;
   slim_window = window;
-  if (!slim_prepare_framebuffer(window)) {
+#if SLIM_GPU_RENDERER
+  if (!slim_gpu_initialize(window)) {
     DestroyWindow(window);
     slim_window = 0;
+    slim_gpu_release_all();
+    return 1;
+  }
+#endif
+  if (!slim_prepare_framebuffer(window)) {
+#if SLIM_HAS_TEXT
+    slim_clear_font_cache();
+    slim_clear_wide_text_cache();
+#endif
+    DestroyWindow(window);
+    slim_window = 0;
+#if SLIM_GPU_RENDERER
+    slim_gpu_release_all();
+#else
     if (slim_surface_dc) {
       SelectObject(slim_surface_dc, slim_surface_previous);
       DeleteObject(slim_surface_bitmap);
@@ -946,6 +1451,7 @@ static int slim_run_window(void) {
       slim_surface_previous = 0;
       slim_surface_pixels = 0;
     }
+#endif
     slim_bind_framebuffer(0, 0, 0, 0);
     return 1;
   }
@@ -996,7 +1502,7 @@ static int slim_run_window(void) {
 #if SLIM_HAS_TEXT
           slim_text_command_count = 0;
 #endif
-          slim_clear();
+          slim_begin_frame();
           slim_frame();
           if (step == 0) {
             slim_pending_directions[0] = 0;
@@ -1009,8 +1515,22 @@ static int slim_run_window(void) {
           }
         }
       }
+      slim_finish_frame();
 #if SLIM_HAS_TEXT
       slim_compose_text();
+#endif
+#if SLIM_SMOKE && SLIM_GPU_RENDERER
+      if (benchmark) {
+        QueryPerformanceCounter(&now);
+        if (!benchmark_snapshot_written &&
+            now.QuadPart - benchmark_start.QuadPart >= frequency.QuadPart * 5) {
+          slim_gpu_write_readback_bmp("slim-composed.bmp");
+          slim_gpu_write_info();
+          benchmark_snapshot_written = 1;
+        }
+        QueryPerformanceCounter(&benchmark_work_end);
+        benchmark_work += (uint64_t)(benchmark_work_end.QuadPart - benchmark_work_start.QuadPart);
+      }
 #endif
       slim_present();
       if (due_ticks > 5) {
@@ -1021,15 +1541,27 @@ static int slim_run_window(void) {
       }
 #if SLIM_SMOKE
       if (benchmark) {
+#if SLIM_GPU_RENDERER
+        QueryPerformanceCounter(&benchmark_elapsed_end);
+        ++benchmark_presents;
+        benchmark_ticks += (uint64_t)steps;
+        if (benchmark_elapsed_end.QuadPart - benchmark_start.QuadPart >= frequency.QuadPart * 5 &&
+            benchmark_snapshot_written) {
+#else
         QueryPerformanceCounter(&benchmark_work_end);
         ++benchmark_presents;
         benchmark_ticks += (uint64_t)steps;
         benchmark_work += (uint64_t)(benchmark_work_end.QuadPart - benchmark_work_start.QuadPart);
         if (benchmark_work_end.QuadPart - benchmark_start.QuadPart >= frequency.QuadPart * 5) {
+#endif
           SlimBenchmarkResult result;
           result.presents = benchmark_presents;
           result.ticks = benchmark_ticks;
+#if SLIM_GPU_RENDERER
+          result.elapsed = (uint64_t)(benchmark_elapsed_end.QuadPart - benchmark_start.QuadPart);
+#else
           result.elapsed = (uint64_t)(benchmark_work_end.QuadPart - benchmark_start.QuadPart);
+#endif
           result.frequency = (uint64_t)frequency.QuadPart;
           result.work = benchmark_work;
           result.framebuffer_width = (uint32_t)slim_fb_width;
@@ -1051,7 +1583,11 @@ static int slim_run_window(void) {
             result.dpi_awareness = get_context && get_awareness ? (uint32_t)get_awareness(get_context(window)) : 0;
           }
           slim_write_benchmark(&result);
+#if SLIM_GPU_RENDERER
+          slim_gpu_write_info();
+#else
           slim_write_composed_bmp();
+#endif
           DestroyWindow(window);
           break;
         }
@@ -1068,6 +1604,14 @@ static int slim_run_window(void) {
   slim_audio_stop();
 #endif
   if (timer_resolution_requested) timeEndPeriod(1);
+#if SLIM_HAS_TEXT
+  slim_clear_font_cache();
+  slim_clear_wide_text_cache();
+#endif
+#if SLIM_GPU_RENDERER
+  slim_gpu_release_all();
+  slim_gpu_window = 0;
+#else
   if (slim_surface_dc) {
     SelectObject(slim_surface_dc, slim_surface_previous);
     DeleteObject(slim_surface_bitmap);
@@ -1077,6 +1621,10 @@ static int slim_run_window(void) {
     slim_surface_previous = 0;
     slim_surface_pixels = 0;
   }
+#endif
+#if SLIM_HAS_TEXT
+  slim_clear_font_cache();
+#endif
   slim_bind_framebuffer(0, 0, 0, 0);
   return 0;
 }

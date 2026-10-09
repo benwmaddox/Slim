@@ -24,12 +24,17 @@ const androidApi = 26;
 const androidTargetApi = 36;
 
 function usage() {
-  console.log('Usage: node tools/build-native.mjs [source.slim] [--target windows|android|all] [--out-dir DIR] [--abi arm64-v8a[,x86_64]] [--unsigned] [--smoke]');
+  console.log('Usage: node tools/build-native.mjs [source.slim] [--target windows|android|all] [--renderer software|gpu] [--out-dir DIR] [--abi arm64-v8a[,x86_64]] [--unsigned] [--smoke]');
   console.log('Builds the smallest complete native artifact among -Oz, -Os, and -O2 candidates. Android defaults to arm64-v8a.');
 }
 
-function parseArgs(argv) {
-  const options = {source: undefined, target: 'all', outDir: undefined, abis: ['arm64-v8a'], unsigned: false, smoke: false};
+export function normalizeNativeRenderer(renderer = 'software') {
+  if (!['software', 'gpu'].includes(renderer)) throw new Error('--renderer must be software or gpu');
+  return renderer;
+}
+
+export function parseNativeArgs(argv, projectRoot = root) {
+  const options = {source: undefined, target: 'all', renderer: 'software', outDir: undefined, abis: ['arm64-v8a'], unsigned: false, smoke: false};
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') {
@@ -42,6 +47,11 @@ function parseArgs(argv) {
     }
     if (arg === '--smoke') {
       options.smoke = true;
+      continue;
+    }
+    if (arg === '--renderer' || arg.startsWith('--renderer=')) {
+      options.renderer = optionValue(argv, i, arg, '--renderer');
+      if (!arg.includes('=')) i += 1;
       continue;
     }
     if (arg === '--target' || arg.startsWith('--target=')) {
@@ -65,15 +75,19 @@ function parseArgs(argv) {
     options.source = arg;
   }
   if (!['windows', 'android', 'all'].includes(options.target)) throw new Error('--target must be windows, android, or all');
+  options.renderer = normalizeNativeRenderer(options.renderer);
   if (!options.abis.length || options.abis.some((abi) => !['arm64-v8a', 'x86_64'].includes(abi))) {
     throw new Error('--abi must be arm64-v8a, x86_64, or a comma-separated combination');
   }
   if (new Set(options.abis).size !== options.abis.length) throw new Error('--abi contains a duplicate ABI');
-  const source = resolve(root, options.source || 'examples/rainbow.slim');
+  const source = resolve(projectRoot, options.source || 'examples/rainbow.slim');
   const stem = safeStem(source);
   options.source = source;
   options.stem = stem;
-  options.outDir = resolve(root, options.outDir || join('output', 'native', stem));
+  const defaultOutDir = options.renderer === 'gpu'
+    ? join('output', 'native', stem, 'gpu')
+    : join('output', 'native', stem);
+  options.outDir = resolve(projectRoot, options.outDir || defaultOutDir);
   return options;
 }
 
@@ -180,6 +194,39 @@ function macrosFor(importNames) {
   }));
 }
 
+export function deriveNativeBuildMetadata(sourceText, importNames, renderer = 'software') {
+  const nativeOpaqueFrame = hasNativeOpaqueFrameAnnotation(sourceText);
+  const nativeRenderer = normalizeNativeRenderer(renderer);
+  return {
+    nativeOpaqueFrame,
+    renderer: nativeRenderer,
+    macros: {
+      ...macrosFor(importNames),
+      SLIM_OPAQUE_FRAME: nativeOpaqueFrame ? '1' : '0',
+      SLIM_GPU_RENDERER: nativeRenderer === 'gpu' ? '1' : '0',
+    },
+  };
+}
+
+function hasNativeOpaqueFrameAnnotation(sourceText) {
+  for (const rawLine of sourceText.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line === '// native-opaque-frame: true') return true;
+    if (!line.startsWith('//')) return false;
+  }
+  return false;
+}
+
+export function isNativeBuildMain(argvPath, modulePath, platform = process.platform) {
+  if (!argvPath) return false;
+  const argvResolved = resolve(argvPath);
+  const moduleResolved = resolve(modulePath);
+  return platform === 'win32'
+    ? argvResolved.toLowerCase() === moduleResolved.toLowerCase()
+    : argvResolved === moduleResolved;
+}
+
 function macroArgs(macros) {
   return Object.entries(macros).map(([name, value]) => `-D${name}=${value}`);
 }
@@ -267,10 +314,13 @@ function configuredWindowsToolchain() {
   const msvcVersion = process.env.SLIM_MSVC_VERSION || newestVersion(directoryNamesSync(join(vsRoot, 'VC', 'Tools', 'MSVC')));
   if (!sdkVersion) throw new Error(`Windows SDK Include directory not found under ${sdkRoot}`);
   if (!msvcVersion) throw new Error(`MSVC headers not found under ${vsRoot}`);
+  const clangResourceDir = run(clangPath, ['-print-resource-dir'], 'Clang resource directory').stdout.trim();
+  if (!clangResourceDir) throw new Error(`Clang resource directory not reported by ${clangPath}`);
   const includeRoot = join(sdkRoot, 'Include', sdkVersion);
   const sdkLibRoot = join(sdkRoot, 'Lib', sdkVersion);
   const msvcRoot = join(vsRoot, 'VC', 'Tools', 'MSVC', msvcVersion);
   const includeDirs = [
+    join(clangResourceDir, 'include'),
     join(msvcRoot, 'include'),
     join(includeRoot, 'ucrt'),
     join(includeRoot, 'shared'),
@@ -280,8 +330,10 @@ function configuredWindowsToolchain() {
   const libDirs = [join(msvcRoot, 'lib', 'x64'), join(sdkLibRoot, 'ucrt', 'x64'), join(sdkLibRoot, 'um', 'x64')];
   for (const path of [clangPath, ...includeDirs, ...libDirs]) mustExist(path, 'Windows toolchain path');
   const llvmBin = dirname(clangPath);
+  const fxc = process.env.SLIM_FXC || join(sdkRoot, 'bin', sdkVersion, 'x64', 'fxc.exe');
   return {
     clang: clangPath,
+    fxc,
     includeDirs,
     libDirs,
     strip: existsSync(join(llvmBin, 'llvm-strip.exe')) ? join(llvmBin, 'llvm-strip.exe') : undefined,
@@ -299,7 +351,7 @@ function directoryNamesSync(path) {
   }
 }
 
-function windowsBaseArgs(toolchain, gameSource, hostPath, gameDir, macros, profile) {
+function windowsBaseArgs(toolchain, gameSource, hostPath, gameDir, macros, profile, renderer) {
   const args = [
     '-std=c11', '-target', 'x86_64-pc-windows-msvc', '-fuse-ld=lld',
     profile.optimization, '-flto', '-ffp-contract=off', '-ffunction-sections', '-fdata-sections',
@@ -311,8 +363,56 @@ function windowsBaseArgs(toolchain, gameSource, hostPath, gameDir, macros, profi
     '-Xlinker', '/nodefaultlib', '-Xlinker', '/opt:ref', '-Xlinker', '/opt:icf', '-Xlinker', '/incremental:no',
     '-Xlinker', '/manifest:no', '-Xlinker', '/brepro', ...toolchain.libDirs.flatMap((path) => ['-L', path]),
     '-lkernel32', '-luser32', '-lgdi32', '-lwinmm', '-lucrt', '-lmsvcrt',
+    ...(renderer === 'gpu' ? ['-ld3d11', '-ldxgi'] : []),
   ];
   return args;
+}
+
+function shaderHeaderBytes(symbol, bytes) {
+  if (!bytes.length) throw new Error(`FXC produced an empty shader blob for ${symbol}`);
+  const values = [];
+  for (let i = 0; i < bytes.length; i += 12) {
+    values.push(`  ${[...bytes.subarray(i, i + 12)].map((byte) => `0x${byte.toString(16).padStart(2, '0')}`).join(', ')},`);
+  }
+  return `static const unsigned char ${symbol}[] = {\n${values.join('\n')}\n};\n`;
+}
+
+async function compileWindowsShaders(toolchain, staging) {
+  const fxc = mustExist(toolchain.fxc, 'Windows SDK FXC shader compiler');
+  const sourcePath = mustExist(join(root, 'native', 'windows-gpu.hlsl'), 'Windows GPU shader source');
+  const source = await fileInfo(sourcePath);
+  const specs = [
+    {key: 'vertex', entry: 'slim_vs', profile: 'vs_4_0', symbol: 'slim_gpu_vs'},
+    {key: 'pixel', entry: 'slim_ps', profile: 'ps_4_0', symbol: 'slim_gpu_ps'},
+  ];
+  const compiled = {};
+  const headerParts = ['/* Generated from stripped DXBC; this temporary header is not a packaged asset. */'];
+  for (const spec of specs) {
+    const blobPath = join(staging, `slim-gpu-${spec.key}.cso`);
+    const args = [
+      '/nologo', '/E', spec.entry, '/T', spec.profile, '/O3', '/Ges',
+      '/Qstrip_debug', '/Qstrip_reflect', '/Qstrip_priv', '/Fo', blobPath, sourcePath,
+    ];
+    run(fxc, args, `FXC ${spec.profile}`, {env: childBuildEnvironment(staging)});
+    const bytes = await readFile(blobPath);
+    headerParts.push(shaderHeaderBytes(spec.symbol, bytes));
+    compiled[spec.key] = {
+      entry: spec.entry,
+      profile: spec.profile,
+      compilerArgs: portableArgs(args, staging),
+      blob: {bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex')},
+    };
+  }
+  const headerPath = join(staging, 'slim-gpu-shaders.h');
+  await writeFile(headerPath, `${headerParts.join('\n')}\n`);
+  const header = await fileInfo(headerPath);
+  return {
+    source: {path: sourcePath, ...source},
+    compiler: fxc,
+    compilerSdk: toolchain.sdkVersion,
+    header: {bytes: header.bytes, sha256: header.sha256},
+    shaders: compiled,
+  };
 }
 
 async function windowsImports(toolchain, exePath) {
@@ -326,12 +426,13 @@ async function buildWindows(options, gameCode, sourceImports, hostImports, macro
   const hostPath = mustExist(join(root, 'native', 'windows.c'), 'Windows native host');
   const staging = await temporaryDirectory('slim-win-build-');
   try {
+    const shaderCompilation = options.renderer === 'gpu' ? await compileWindowsShaders(toolchain, staging) : undefined;
     const gameSource = join(staging, 'game.c');
     await writeFile(gameSource, gameCode);
     const candidates = [];
     for (const profile of profiles) {
       const exePath = join(staging, `${options.stem}-${profile.name}.exe`);
-      const args = windowsBaseArgs(toolchain, gameSource, hostPath, staging, macros, profile);
+      const args = windowsBaseArgs(toolchain, gameSource, hostPath, staging, macros, profile, options.renderer);
       if (options.smoke) args.splice(args.indexOf(hostPath), 0, '-DSLIM_SMOKE=1');
       const invocationArgs = [...args, '-o', exePath];
       const buildEnv = childBuildEnvironment(staging);
@@ -361,6 +462,7 @@ async function buildWindows(options, gameCode, sourceImports, hostImports, macro
     const zipInfo = await fileInfo(zipOutput);
     return {
       target: 'windows',
+      renderer: options.renderer,
       selectedProfile: best.profile,
       compiler: toolchain.clang,
       exactCompilerArgs: best.flags,
@@ -372,6 +474,8 @@ async function buildWindows(options, gameCode, sourceImports, hostImports, macro
       sourceImports,
       hostImports,
       systemDllImports: await windowsImports(toolchain, exeOutput),
+      rendererSystemDependencies: options.renderer === 'gpu' ? ['d3d11.dll', 'dxgi.dll'] : [],
+      ...(shaderCompilation ? {shaderCompilation} : {}),
       candidates: candidates.map(({profile, flags, stripFlags, exeBytes, exeSha256, zipBytes}) => ({profile, compilerArgs: flags, stripFlags, exeBytes, exeSha256, portableZipBytes: zipBytes})),
       toolchain: {sdk: toolchain.sdkVersion, msvc: toolchain.msvcVersion},
     };
@@ -404,12 +508,20 @@ const androidTargets = {
   x86_64: 'x86_64-linux-android',
 };
 
-function androidManifest(stem) {
+export function deriveAndroidIdentity(stem, renderer = 'software') {
+  const nativeRenderer = normalizeNativeRenderer(renderer);
   const packageStem = stem.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^[^a-z]+/, 'game_') || 'game';
-  const packageName = `com.slim.native.${packageStem}`;
-  const label = displayName(stem).replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-  const manifest = `<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="${packageName}">\n  <uses-sdk android:minSdkVersion="${androidApi}" android:targetSdkVersion="${androidTargetApi}" />\n  <application android:label="${label}" android:hasCode="false" android:allowBackup="false" android:extractNativeLibs="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">\n    <activity android:name="android.app.NativeActivity" android:screenOrientation="landscape" android:configChanges="orientation|keyboardHidden|screenSize" android:exported="true">\n      <meta-data android:name="android.app.lib_name" android:value="slim" />\n      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>\n    </activity>\n  </application>\n</manifest>\n`;
-  return {packageName, manifest};
+  const packageName = `com.slim.native.${packageStem}${nativeRenderer === 'gpu' ? '.gpu' : ''}`;
+  const appLabel = `${displayName(stem)}${nativeRenderer === 'gpu' ? ' (GPU)' : ''}`;
+  const escapedLabel = appLabel.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  return {packageName, appLabel, escapedLabel};
+}
+
+function androidManifest(stem, renderer) {
+  const {packageName, appLabel, escapedLabel} = deriveAndroidIdentity(stem, renderer);
+  const label = escapedLabel;
+  const manifest = `<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="${packageName}">\n  <uses-sdk android:minSdkVersion="${androidApi}" android:targetSdkVersion="${androidTargetApi}" />\n  <application android:label="${label}" android:hasCode="false" android:allowBackup="false" android:extractNativeLibs="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">\n    <activity android:name="android.app.NativeActivity" android:launchMode="singleTask" android:screenOrientation="landscape" android:configChanges="orientation|keyboardHidden|screenSize" android:exported="true">\n      <meta-data android:name="android.app.lib_name" android:value="slim" />\n      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>\n    </activity>\n  </application>\n</manifest>\n`;
+  return {packageName, appLabel, manifest};
 }
 
 function androidDynamicDependencies(toolchain, soPath) {
@@ -451,7 +563,7 @@ function androidLoadAlignment(toolchain, soPath) {
   return alignments;
 }
 
-function androidCompilerArgs(toolchain, abi, hostPath, gameDir, macros, profile, outputSo) {
+function androidCompilerArgs(toolchain, abi, hostPath, gameDir, macros, profile, outputSo, renderer) {
   const target = androidTargets[abi];
   return [
     '-target', `${target}${androidApi}`,
@@ -461,8 +573,9 @@ function androidCompilerArgs(toolchain, abi, hostPath, gameDir, macros, profile,
     '-fno-ident', '-fno-stack-protector', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-fno-builtin',
     '-Wno-unused-function', '-Wno-unused-parameter', '-Wno-unused-variable', '-Wno-missing-field-initializers',
     '-I', gameDir, '-I', join(root, 'native'), ...macroArgs(macros), hostPath,
-    '-Wl,--gc-sections', '-Wl,--strip-all', '-Wl,--build-id=none', '-Wl,-z,max-page-size=16384', '-Wl,-z,common-page-size=16384',
-    '-Wl,-soname,libslim.so', '-Wl,--as-needed', '-landroid', '-laaudio', '-lm', '-o', outputSo,
+    '-Wl,--gc-sections', '-Wl,--no-undefined', '-Wl,--strip-all', '-Wl,--build-id=none', '-Wl,-z,max-page-size=16384', '-Wl,-z,common-page-size=16384',
+    '-Wl,-soname,libslim.so', '-Wl,--as-needed', '-landroid', '-laaudio',
+    ...(renderer === 'gpu' ? ['-lEGL', '-lGLESv2', '-llog'] : []), '-lm', '-o', outputSo,
   ];
 }
 
@@ -506,6 +619,7 @@ function formatBytes(bytes) {
 }
 
 function printSummary(report, reportPath) {
+  console.log(`Native renderer: ${report.renderer}`);
   const windows = report.targets.windows;
   if (windows) {
     const dependencies = windows.systemDllImports.length ? windows.systemDllImports.join(', ') : 'none';
@@ -529,7 +643,7 @@ async function buildAndroidAbi(options, gameCode, sourceImports, hostImports, ma
     await mkdir(gameDir, {recursive: true});
     const gameSource = join(staging, 'game.c');
     await writeFile(gameSource, gameCode);
-    const {packageName, manifest} = androidManifest(options.stem);
+    const {packageName, appLabel, manifest} = androidManifest(options.stem, options.renderer);
     const manifestPath = join(staging, 'AndroidManifest.xml');
     const baseApk = join(staging, 'base.apk');
     await writeFile(manifestPath, manifest);
@@ -542,7 +656,7 @@ async function buildAndroidAbi(options, gameCode, sourceImports, hostImports, ma
     const candidates = [];
     for (const profile of profiles) {
       const soPath = join(staging, `${profile.name}.so`);
-      const args = androidCompilerArgs(toolchain, abi, hostPath, gameDir, macros, profile, soPath);
+      const args = androidCompilerArgs(toolchain, abi, hostPath, gameDir, macros, profile, soPath, options.renderer);
       args.splice(args.indexOf(hostPath), 0, gameSource);
       const buildEnv = childBuildEnvironment(staging);
       run(toolchain.clang, args, `Android ${abi} ${profile.name} link`, {env: buildEnv});
@@ -584,8 +698,10 @@ async function buildAndroidAbi(options, gameCode, sourceImports, hostImports, ma
     const deps = androidDynamicDependencies(toolchain, soOutput);
     return {
       target: 'android',
+      renderer: options.renderer,
       abi,
       packageName,
+      appLabel,
       minSdk: androidApi,
       targetSdk: androidTargetApi,
       nativeLibrary: {path: soOutput, ...soInfo, compressedInApk: true, extractedOnInstall: true, dynamicDependencies: deps, loadSegmentAlignments: best.loadAlignments},
@@ -615,19 +731,20 @@ async function buildAndroid(options, gameCode, sourceImports, hostImports, macro
   for (const abi of options.abis) {
     builds.push(await buildAndroidAbi(options, gameCode, sourceImports, hostImports, macros, toolchain, signingConfig.signing, abi, output));
   }
-  return {target: 'android', signing: signingConfig.signing ? 'local debug key' : signingConfig.reason, abis: builds};
+  return {target: 'android', renderer: options.renderer, signing: signingConfig.signing ? 'local debug key' : signingConfig.reason, abis: builds};
 }
 
 async function main() {
   let options;
   try {
-    options = parseArgs(process.argv.slice(2));
+    options = parseNativeArgs(process.argv.slice(2));
     const sourceText = await readFile(options.source, 'utf8');
     const detailed = compileCDetailed(sourceText);
     if (!detailed || typeof detailed.code !== 'string') throw new Error('compileCDetailed must return generated C source in its code property');
     const sourceImports = collectNames(detailed.imports);
     const hostImports = collectNames(detailed.hostImports || detailed.imports);
-    const macros = macrosFor(hostImports);
+    const nativeBuildMetadata = deriveNativeBuildMetadata(sourceText, hostImports, options.renderer);
+    const macros = nativeBuildMetadata.macros;
     const python = executable('python', process.env.SLIM_PYTHON) || executable('py', undefined);
     if (!python) throw new Error('Python is required to create compact ZIP/APK containers; set SLIM_PYTHON to its executable path.');
     await mkdir(options.outDir, {recursive: true});
@@ -644,10 +761,12 @@ async function main() {
     const report = {
       source: options.source,
       generatedSource,
+      renderer: options.renderer,
       imports: sourceImports,
       hostImports,
       functions: collectNames(detailed.functions),
       hostMacros: macros,
+      sourceAnnotations: {nativeOpaqueFrame: nativeBuildMetadata.nativeOpaqueFrame},
       optimizationCandidates: profiles.map(({name, optimization}) => ({name, optimization, lto: true, fpContract: false, fastMath: false})),
       allAssetsEmbedded: true,
       targets,
@@ -661,4 +780,4 @@ async function main() {
   }
 }
 
-await main();
+if (isNativeBuildMain(process.argv[1], fileURLToPath(import.meta.url))) await main();
